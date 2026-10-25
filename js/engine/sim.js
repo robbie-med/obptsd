@@ -10,16 +10,20 @@ import { HANDLERS } from './drugs.js';
 import { makeNurse, nurseExam, nurseTick, sveString } from './nurses.js';
 import { setupScenario } from './scenario.js';
 import { resetPatientIds } from './patient.js';
+import { maybeShoulderDystocia, startAFE, realtimeEmergency, erng, AFE_AT_DELIVERY } from './emergency.js';
 
 const MIN = 60, H = 3600;
 export const START_CLOCK = 19 * H;
 
 export class Sim {
   constructor(opts = {}) {
-    this.opts = { seed: 'L&D', mode: 'night', teaching: false, ...opts };
+    this.opts = { seed: 'L&D', mode: 'night', teaching: false, blackCloud: false, ...opts };
     this.seed = String(this.opts.seed);
     this.mode = this.opts.mode;
     this.teaching = !!this.opts.teaching;
+    // "black cloud": the resident everything happens to. Multiplies the rare emergencies.
+    this.blackCloud = !!this.opts.blackCloud;
+    this.rare = this.blackCloud ? { sd: 3, afe: 30 } : { sd: 1, afe: 1 };
     this.rng = new Rng(this.seed);
     this.nrng = this.rng.fork('nurses');
     this.orng = this.rng.fork('orders');
@@ -116,6 +120,7 @@ export class Sim {
   // -------------------------------------------------------------------- lookup helpers
   nurseById(id) { return this.nurses.find(n => n.id === id); }
   nurseOf(p) { return p.nurseId ? this.nurseById(p.nurseId) : null; }
+  realtimeEmergency() { return this.patients.some(p => p.status !== 'gone' && realtimeEmergency(p)); }
   activePatients() { return this.patients.filter(p => p.status !== 'gone'); }
   roomOf(p) { return this.rooms.find(r => r.pid === p.id); }
 
@@ -394,7 +399,7 @@ export class Sim {
 
   doSVE(p, who, reason) {
     const T = p.T;
-    if (T.pp || p.status === 'gone' || p.area === 'or') return;
+    if (T.pp || p.status === 'gone' || p.area === 'or' || realtimeEmergency(p)) return;
     const n = this.nurseOf(p);
     if (!n) return;
     if (p.ns) p.ns.lastSveT = this.t;
@@ -564,6 +569,11 @@ export class Sim {
     if (!p.T.pp || p.status === 'gone') return;
     const pp = p.T.pp;
     const s = this.t - pp.t0;
+    if (p.afe) {
+      // AFE survivors go to the ICU once stable and not pouring blood; until then they stay
+      if (p.afe.phase === 'stable' && pp.bleed < 3 && p.area !== 'or' && this.t - p.afe.stableT > 20 * MIN) this.transferOut(p, 'to the ICU');
+      return;
+    }
     if (s > 2 * H && pp.bleed < 2.5 && (p.area === 'ldr' || p.area === 'pacu')) this.transferOut(p, p.area === 'pacu' ? 'from PACU to postpartum' : 'to postpartum');
   }
 
@@ -712,28 +722,34 @@ export class Sim {
   }
   deliver(p, mode, extra = {}) {
     if (p.outcome) return;
+    if (mode === 'vaginal' && !extra.sdChecked && maybeShoulderDystocia(this, p, extra)) return;
     const T = p.T;
+    T.zav = false;
     if (p.dx.breech && mode !== 'cs') extra.breechVaginal = true;
     const neo = neonatalOutcome(p, this, mode === 'cs' ? 'cs' : 'vaginal', extra);
     const gbsFirst = p.meds.abx.find(a => ['penicillin', 'ampicillin', 'cefazolin'].includes(a.drug) || (a.drug === 'clindamycin' && p.clindaSusc) || a.drug === 'vancomycin');
     p.gbsAdequate = !!gbsFirst && this.t - gbsFirst.t >= 4 * H;
     const secondStageH = p.completeT > 0 ? (this.t - p.completeT) / H : 0;
-    p.outcome = { mode, t: this.t, neo, vacuum: !!extra.vacuum, secondStageH, csInd: p.csRequest ? p.csRequest.ind : null, urgency: p.csRequest ? p.csRequest.urgency : null };
+    p.outcome = { mode, t: this.t, neo, vacuum: !!extra.vacuum, secondStageH, pmcd: !!extra.pmcd, shoulder: !!extra.shoulder, csInd: p.csRequest ? p.csRequest.ind : null, urgency: p.csRequest ? p.csRequest.urgency : null };
     p.status = 'delivered';
     this.setPit(p, 0, 'delivery'); p.meds.pit.protocol = null;
     p.meds.ppOxy = true;
     if (p.meds.cervidil.in) this.removeCervidil(p);
     p.meds.foley.in = false;
     p.pushing = 'no';
-    startPostpartum(p, this, mode === 'cs' ? 'cs' : 'vaginal', { secondStageH, vacuum: extra.vacuum, ga: extra.ga });
+    startPostpartum(p, this, mode === 'cs' ? 'cs' : 'vaginal', { secondStageH, vacuum: extra.vacuum, ga: extra.ga, shoulder: extra.shoulder });
     p.mon.on = false;
     this.logTruth(p, `Delivered (${mode}${extra.vacuum ? ', vacuum' : ''}): true BD ${T.bd.toFixed(1)}`);
-    const where = mode === 'cs' ? 'in the OR' : mode === 'home' ? 'at home' : p.area === 'triage' ? 'IN TRIAGE' : '';
+    const where = extra.pmcd ? 'AT THE BEDSIDE' : mode === 'cs' ? 'in the OR' : mode === 'home' ? 'at home' : p.area === 'triage' ? 'IN TRIAGE' : '';
     const nt = neo.liveborn ? `Baby ${neo.sex}, ${neo.weight} g, Apgars ${neo.apgar1}/${neo.apgar5}${neo.notes.length ? '. ' + neo.notes.join('; ') : ''}.` : 'Stillborn.';
     this.msg(mode === 'cs' ? 'OR' : (this.nurseOf(p)?.name || 'RN') + ', RN', 'delivery', p, `Delivered ${where} at ${this.clock()} (${mode === 'cs' ? 'cesarean' : mode === 'home' ? 'precipitous, unattended' : 'vaginal' + (extra.vacuum ? ', vacuum' : '')}). ${nt}${neo.nicu ? ' NICU team taking baby.' : ''}`, neo.nicu || !neo.liveborn ? 2 : 1);
     if (neo.liveborn) this.after(15 * MIN, () => this.msg('Lab', 'lab', p, `Cord gas (arterial): pH ${neo.pH.toFixed(2)}, BD ${neo.bd}.`, neo.pH < 7.1 ? 2 : 0));
     if (mode !== 'cs' && mode !== 'home' && p.area === 'triage') { const room = this.freeRoom(); if (room) { this.vacate(p, 0); this.placeInRoom(p, room); } }
     if (p.area === 'ldr' || p.area === 'triage') p.status = 'recovery';
+    if (!p.afe && mode !== 'home') {
+      const r = erng(p);
+      if (r.chance(AFE_AT_DELIVERY * (mode === 'cs' ? 2 : 1) * (extra.vacuum ? 1.5 : 1) * this.rare.afe)) this.after(r.range(1, 20) * MIN, () => startAFE(this, p));
+    }
   }
   vacuum(p) {
     const T = p.T, r = this.nrng;
@@ -794,6 +810,7 @@ export class Sim {
     const a = this.anes[0];
     if (!a.task) return 'free';
     const p = this.byId[a.task.pid];
+    if (a.task.kind === 'code') return `running a code in ${p ? p.room : '?'}`;
     return `${a.task.kind === 'cs' ? 'in the OR' : 'placing an epidural in ' + (p ? p.room : '?')}, ~${Math.max(1, Math.round((a.busyUntil - this.t) / 60))} min`;
   }
   requestCS(p, urgency, ind) {
@@ -978,6 +995,9 @@ export class Sim {
       case 'mag_resp':
         if (offFloor) return;
         this.page(p, `She's really hard to wake up and her breathing is shallow!`, 3, [{ label: 'Stop mag', cmd: { type: 'order', pid: p.id, text: 'stop mag' } }, { label: 'Calcium gluconate', cmd: { type: 'order', pid: p.id, text: 'calcium gluconate 1 g IV' } }]);
+        return;
+      case 'afe':
+        startAFE(this, p);
         return;
       case 'mag_arrest':
         this.page(p, `CODE BLUE — ${p.room}!`, 3);

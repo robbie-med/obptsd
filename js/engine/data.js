@@ -10,6 +10,17 @@
 //  [ACOG-PB107] Induction of labor; [ACOG-PB205] VBAC (avoid prostaglandins in TOLAC).
 //  [ACOG-PB183] Postpartum hemorrhage; WOMAN trial (TXA 1 g within 3 h).
 //  [ACOG-PB106] Intrapartum FHR monitoring: nomenclature, interpretation (NICHD 2008).
+//  [ACOG-PB178] Shoulder dystocia (2017): McRoberts and suprapubic pressure first, then posterior arm,
+//              rotational maneuvers, all-fours; Zavanelli as a last resort; no fundal pressure.
+//  [Gherman1997] Gherman RB, et al. Am J Obstet Gynecol 1997: McRoberts alone resolved ~42%.
+//  [Hoffman2011] Hoffman MK, et al. Obstet Gynecol 2011;117:1272: posterior shoulder delivery had the
+//              highest success (84%).
+//  [Bruner1998] Bruner JP, et al. J Reprod Med 1998: Gaskin all-fours maneuver, 83%.
+//  [Leung2011]  Leung TY, et al. BJOG 2011: acidosis and HIE rise with head-to-body interval >= 5 min.
+//  [AHA2015]    Jeejeebhoy FM, et al. Cardiac arrest in pregnancy, Circulation 2015: manual left uterine
+//              displacement; resuscitative hysterotomy if no ROSC by 4 min, delivery by 5 min.
+//  [SMFM-AFE2016] SMFM Clinical Guideline No. 9: Amniotic fluid embolism (2016): sudden hypoxia,
+//              hypotension, arrest and DIC; give cryo/FFP early.
 
 // Median hours to progress from the given cm to the next, spontaneous labor, [Zhang2010] Table 2.
 // Values below 3-4 cm are extrapolated (Zhang reports 3->4 for P0 only); ripeness gates them anyway.

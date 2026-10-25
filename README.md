@@ -21,8 +21,30 @@ No build step, no dependencies: plain ES modules.
   inductions and sections, triage walk-ins, phone calls, family requests, a nurse shift change at 23:00.
 - **Short shift**: 19:00–23:00, three patients.
 - **Single patient**: one unripe G1 induction and her nurse (spec build step 2).
+- **☁ Black cloud** (menu toggle, any mode): shoulder dystocia ×3, amniotic fluid embolism ×30. For when you want
+  your colleagues to remember the night.
 - **Tracing lab**: one laboring patient with sliders for the hidden knobs: placental reserve, Pit, cord
   vulnerability, base deficit, epidural hypotension, fever, ROM/IUPC/FSE, cord prolapse (spec build step 1).
+
+## Emergencies (real time)
+
+A shoulder dystocia or a maternal code drops the clock to 1× (it won't fast-forward until it's over), sounds an
+alarm if sound is on, and puts a bar with a timer and the relevant buttons above the chart. The rest of the floor keeps
+paging you.
+
+- **Shoulder dystocia**: rolled at every vaginal birth on the floor from EFW, GDM and vacuum (hidden difficulty per
+  baby). The head is out, the strip is gone, and the fetus loses ~0.02 pH per minute. You call the maneuvers: McRoberts,
+  suprapubic, posterior arm, Rubin/Woods, all fours, episiotomy, Zavanelli. Each takes time and has a success rate from
+  the literature; repeats work less well. Traction and fundal pressure are available, get nurse pushback, and hurt
+  the baby. If you freeze, the nurse does McRoberts at 1 min and the backup OB walks in at 5–9 min.
+- **Amniotic fluid embolism**: rare hazard while laboring with ROM, and right after delivery. "I feel like I'm going
+  to die" → collapse (hypoxia, hypotension, fetal bradycardia) → cardiac arrest in ~70% → DIC either way. In the code
+  you run epi, LUD, shocks (only VF is shockable), intubation once anesthesia or the code team arrive, and the
+  resuscitative hysterotomy at 4 min. Delivery is what gets the pulse back. Anesthesia may be stuck in the OR. Then the
+  bleeding: MTP, cryo, FFP, TXA. Mothers can die.
+
+Scoring judges the response, not the bad luck: head-to-body interval, traction, arrest-to-delivery (> 5 min), LUD, and
+epinephrine in the first 5 min. Rates and maneuver success are cited in `data.js`.
 
 ## Architecture (`js/engine` is UI-free and runs headless in Node)
 
@@ -35,6 +57,7 @@ No build step, no dependencies: plain ES modules.
 | `orders.js` / `drugs.js` | Free-text order parser, plus a drug/action database with dose, route and interval limits and contraindications → pharmacy callback, nurse pushback, or harm |
 | `sim.js` | The floor: rooms, triage, OR + anesthesia queues, labs, delivery, messages, command log and replay |
 | `scenario.js` | Sign-out presets, the board, the chaos timeline, shift change |
+| `emergency.js` | Shoulder dystocia and AFE/maternal-arrest state machines (maneuvers, code team, rhythm checks, hysterotomy) |
 | `scoring.js` | Outcomes, NTSV CS rate, OCC-2014 CS criteria, DDI, severe-BP time-to-treat |
 
 UI (`js/ui`): `app.js` (board, chart, orders, pages, speed loop), `strip.js` (US paper at 3 cm/min),

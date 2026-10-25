@@ -4,6 +4,7 @@
 // issue: { by: 'pharmacy'|'nurse'|'anesthesia'|'attending', hard, sev (1-3), msg }
 import { clamp } from './util.js';
 import { doROM } from './physio.js';
+import { SD_MOVES, queueMove, callHelp, callCode, inArrest, hysterotomy } from './emergency.js';
 
 const MIN = 60;
 
@@ -53,18 +54,21 @@ function bolusDrug(def) {
       const route = o.route || def.defRoute;
       const lim = (def.routeLimits && def.routeLimits[route]) || def;
       const issues = [];
-      if (!def.routes.includes(route)) issues.push(pharm(`${def.label} ${route} is not a route we dispense. Usual: ${def.routes.join('/')}.`, !def.softRoutes?.includes(route)));
-      if (amt > lim.hardMax) issues.push(pharm(`${def.label} ${amt} ${def.unit} ${route} exceeds the maximum single dose (${lim.softMax} ${def.unit}). Please clarify.`, true));
-      else if (amt > lim.softMax) issues.push(pharm(`${def.label} ${amt} ${def.unit} ${route} is above the usual maximum (${lim.softMax} ${def.unit}).`));
-      else if (amt < lim.typical[0] * 0.5) issues.push(pharm(`${def.label} ${amt} ${def.unit} is below the usual dose (${lim.typical[0]}–${lim.typical[1]} ${def.unit}).`));
+      const code = def.codeDose && def.codeDose(p, route); // code-cart dose: nobody questions it, it's in your hand
+      if (!code) {
+        if (!def.routes.includes(route)) issues.push(pharm(`${def.label} ${route} is not a route we dispense. Usual: ${def.routes.join('/')}.`, !def.softRoutes?.includes(route)));
+        if (amt > lim.hardMax) issues.push(pharm(`${def.label} ${amt} ${def.unit} ${route} exceeds the maximum single dose (${lim.softMax} ${def.unit}). Please clarify.`, true));
+        else if (amt > lim.softMax) issues.push(pharm(`${def.label} ${amt} ${def.unit} ${route} is above the usual maximum (${lim.softMax} ${def.unit}).`));
+        else if (amt < lim.typical[0] * 0.5) issues.push(pharm(`${def.label} ${amt} ${def.unit} is below the usual dose (${lim.typical[0]}–${lim.typical[1]} ${def.unit}).`));
+      }
       const last = sim.lastDose(p, def.drug);
       if (def.minIntervalMin && last && sim.t - last.t < def.minIntervalMin * MIN) {
         issues.push(nurse(`Last ${def.label} was ${Math.round((sim.t - last.t) / 60)} min ago (at ${fmtTime(sim, last.t)}).`, 1));
       }
-      if (def.extraIssues) issues.push(...def.extraIssues(p, sim, amt, route, o));
+      if (def.extraIssues && !code) issues.push(...def.extraIssues(p, sim, amt, route, o));
       return {
         ok: true, label: `${def.label} ${amt >= 1 ? +amt.toFixed(2) : amt} ${def.unit} ${route}`, issues,
-        delay: def.delay || PYXIS, who: 'nurse',
+        delay: code ? [0.1, 0.4] : def.delay || PYXIS, who: 'nurse',
         run: () => {
           sim.addDose(p, { drug: def.drug, amt: def.unit === 'mcg' ? amt : amt, route, pp: delivered(p) });
           if (def.onRun) def.onRun(p, sim, amt, route);
@@ -425,7 +429,9 @@ export const HANDLERS = {
   phenylephrine: bolusDrug({ drug: 'phenylephrine', label: 'Phenylephrine', unit: 'mcg', routes: ['IV'], defRoute: 'IV', typical: [50, 200], softMax: 200, hardMax: 1000, default: 100 }),
   ephedrine: bolusDrug({ drug: 'ephedrine', label: 'Ephedrine', unit: 'mg', routes: ['IV'], defRoute: 'IV', typical: [5, 10], softMax: 25, hardMax: 50, default: 10 }),
   epinephrine: bolusDrug({ drug: 'epinephrine', label: 'Epinephrine', unit: 'mg', routes: ['IM', 'IV'], defRoute: 'IM', typical: [0.3, 0.5], softMax: 0.5, hardMax: 1, default: 0.3,
-    extraIssues(p, sim, amt, route) { return route === 'IV' && amt >= 0.3 ? [pharm('Epinephrine IV bolus ≥0.3 mg outside of a code — did you mean IM?')] : []; } }),
+    codeDose(p, route) { return route === 'IV' && inArrest(p); },
+    extraIssues(p, sim, amt, route) { return route === 'IV' && amt >= 0.3 ? [pharm('Epinephrine IV bolus ≥0.3 mg outside of a code — did you mean IM?')] : []; },
+    onRun(p, sim) { if (inArrest(p) && p.afe.firstEpiT == null) p.afe.firstEpiT = sim.t; } }),
   albuterol: bolusDrug({ drug: 'albuterol', label: 'Albuterol neb', unit: 'mg', routes: ['NEB'], softRoutes: ['PO', 'IV'], defRoute: 'NEB', typical: [2.5, 5], softMax: 5, hardMax: 10, default: 2.5,
     onRun(p) { p.T.bronch = Math.max(0, p.T.bronch - 0.5); } }),
   fluids: {
@@ -511,6 +517,7 @@ export const HANDLERS = {
   },
   reposition: {
     prepare(o, p, sim) {
+      if (p.sd && p.sd.active) return HANDLERS.gaskin.prepare(o, p, sim); // "hands and knees" mid-dystocia
       return { ok: true, label: 'Position change', issues: [], delay: [1, 3], who: 'nurse', run: () => sim.reposition(p) };
     },
   },
@@ -541,6 +548,8 @@ export const HANDLERS = {
   cs: {
     prepare(o, p, sim) {
       if (delivered(p)) return { ok: false, err: 'She has delivered.' };
+      if (p.sd && p.sd.active) return { ok: false, err: 'The head is delivered — you can\'t section her without putting it back first (Zavanelli).' };
+      if (inArrest(p)) return { ok: false, err: 'She has no pulse — there\'s no time to get to the OR. Resuscitative hysterotomy, here.' };
       if (p.csRequest) return { ok: false, err: `Cesarean already booked (${p.csRequest.urgency}).` };
       const urgency = o.urgency || (o.indication === 'repeat' || o.indication === 'request' || o.indication === 'malpres' ? 'routine' : 'urgent');
       const ind = o.indication || 'other';
@@ -550,6 +559,7 @@ export const HANDLERS = {
   vacuum: {
     prepare(o, p, sim) {
       if (delivered(p)) return { ok: false, err: 'She has delivered.' };
+      if (p.sd && p.sd.active) return { ok: false, err: 'The head is already out. It\'s the shoulder that\'s stuck.' };
       return { ok: true, label: 'Operative vaginal delivery (vacuum)', issues: [], delay: [2, 5], who: 'md', run: () => sim.vacuum(p) };
     },
   },
@@ -595,7 +605,22 @@ export const HANDLERS = {
       const n = clamp(o.units || 2, 1, 10);
       const issues = [];
       if (!p.chart.labs.some(l => l.key === 'ts' && l.resultT <= sim.t)) issues.push(nurse(`No type and screen back — emergency-release O-neg?`, 1));
+      if (o.mtp) return { ok: true, label: `Massive transfusion protocol (cooler: ${n} PRBC, ${n} FFP, 1 plt)`, issues: [], delay: [8, 15], who: 'nurse',
+        run: () => { sim.transfuse(p, n); p.T.fib += 8 * n; p.T.plt += 30; p.flags.mtp = sim.t; } };
       return { ok: true, label: `Transfuse ${n} units PRBC`, issues, delay: [10, 20], who: 'nurse', run: () => sim.transfuse(p, n) };
+    },
+  },
+  // ~10 units of cryo raises fibrinogen ~70-100 mg/dL; FFP ~8-10 per unit. Both have to thaw.
+  cryo: {
+    prepare(o, p, sim) {
+      const n = clamp(o.units || 10, 1, 30);
+      return { ok: true, label: `Cryoprecipitate ${n} units`, issues: [], delay: [15, 30], who: 'nurse', run: () => { p.T.fib += 8 * n; sim.note(p, `Cryo ${n} u`); } };
+    },
+  },
+  ffp: {
+    prepare(o, p, sim) {
+      const n = clamp(o.units || 4, 1, 12);
+      return { ok: true, label: `FFP ${n} units`, issues: [], delay: [20, 40], who: 'nurse', run: () => { p.T.fib += 9 * n; if (p.T.pp) p.T.pp.transfused += 120 * n; sim.note(p, `FFP ${n} u`); } };
     },
   },
   returnor: {
@@ -612,8 +637,79 @@ export const HANDLERS = {
       } };
     },
   },
+  help: {
+    prepare(o, p, sim) {
+      if (p.afe && ['collapse', 'arrest'].includes(p.afe.phase)) return HANDLERS.code.prepare(o, p, sim);
+      if (!p.sd || !p.sd.active) return { ok: false, err: 'Help with what? (For the OR team: "call backup".)' };
+      return { ok: true, label: 'Call for help (NICU, charge, backup OB)', issues: [], delay: [0, 0], who: 'md', run: () => callHelp(sim, p) };
+    },
+  },
+  code: {
+    prepare(o, p, sim) {
+      if (!p.afe || !['collapse', 'arrest'].includes(p.afe.phase)) return { ok: false, err: 'She has a pulse and she is talking to you.' };
+      if (p.afe.codeT != null) return { ok: false, err: 'The code is already called — they\'re on the way.' };
+      return { ok: true, label: 'Code blue', issues: [], delay: [0, 0], who: 'md', run: () => callCode(sim, p) };
+    },
+  },
+  lud: {
+    prepare(o, p, sim) {
+      if (delivered(p)) return { ok: false, err: 'She has delivered — nothing to displace.' };
+      if (!inArrest(p)) return { ok: false, err: 'She is not in arrest. (Tilt her: "left lateral".)' };
+      if (p.afe.lud) return { ok: false, err: 'Someone is already holding the uterus over.' };
+      return { ok: true, label: 'Manual left uterine displacement', issues: [], delay: [0.2, 0.5], who: 'nurse', run: () => { p.afe.lud = true; sim.nurseSays(p, `I've got the uterus pushed over to the left. Keep going.`, 1); } };
+    },
+  },
+  defib: {
+    prepare(o, p, sim) {
+      if (!inArrest(p)) return { ok: false, err: 'She has a pulse.' };
+      const a = p.afe;
+      const shockable = a.rhythm === 'VF';
+      const known = a.lastCheck ? a.lastCheck.rhythm : null;
+      const issues = known && known !== 'VF' ? [nurse(`That's ${known} — not a shockable rhythm.`, 3)] : [];
+      return { ok: true, label: 'Defibrillate 200 J', issues, delay: [0.1, 0.3], who: 'nurse', run: () => {
+        a.shocks++;
+        if (shockable) { a.shocked = true; sim.nurseSays(p, `Clear — shock delivered. Back on the chest.`, 1); }
+        else { a.badShock++; sim.nurseSays(p, `Shock delivered. Nothing changes. Back on the chest.`, 1); }
+      } };
+    },
+  },
+  intubate: {
+    prepare(o, p, sim) {
+      const a = p.afe;
+      if (!a || !['collapse', 'arrest', 'rosc'].includes(a.phase)) return { ok: false, err: 'Anesthesia: "She is talking to me. I am not intubating her."' };
+      if (a.intubated) return { ok: false, err: 'She is already intubated.' };
+      const t = sim.t;
+      const ready = (a.anesT != null && t >= a.anesT) || (a.teamT != null && t >= a.teamT);
+      if (!ready) return { ok: false, err: 'Nobody here can intubate yet — bag-mask until anesthesia or the code team arrive.' };
+      return { ok: true, label: 'Intubate (anesthesia)', issues: [], delay: [1, 2], who: 'anesthesia', run: () => { a.intubated = true; sim.msg('Airway', 'anesthesia', p, `Tube's in, good color change, bilateral breath sounds.`, 1); } };
+    },
+  },
+  hysterotomy: {
+    prepare(o, p, sim) {
+      if (delivered(p)) return { ok: false, err: 'The baby is already out.' };
+      if (!inArrest(p)) return { ok: false, err: p.afe ? 'She has a pulse — if she needs delivery, call a STAT section.' : 'She is not in arrest.' };
+      if (p.afe.hystT != null) return { ok: false, err: 'You are already cutting.' };
+      if (p.gaDays < 140) return { ok: false, err: 'Under 20 weeks the uterus is not compressing the cava — no benefit.' };
+      return { ok: true, label: 'Resuscitative hysterotomy (you, at the bedside)', issues: [], delay: [0, 0], who: 'md', run: () => hysterotomy(sim, p) };
+    },
+  },
   labs: { prepare() { return { ok: false, err: 'Which labs? e.g. CBC, PIH labs, UPC, type and screen, fibrinogen, mag level.' }; } },
 };
+// shoulder dystocia maneuvers: you call them, the team does them one at a time against the clock
+for (const key of Object.keys(SD_MOVES)) {
+  HANDLERS[key] = {
+    prepare(o, p, sim) {
+      if (!p.sd || !p.sd.active) return { ok: false, err: 'There is no shoulder dystocia.' };
+      const issues = [];
+      if (key === 'fundal') issues.push(nurse(`Fundal pressure on a shoulder?! That jams it in harder — we don't do that.`, 3));
+      if (key === 'traction') issues.push(nurse(`Pulling harder is how babies get Erb's palsy.`, 2));
+      return { ok: true, label: SD_MOVES[key].label, issues, delay: [0, 0], who: 'md', run: () => {
+        const r = queueMove(sim, p, key, 'md');
+        if (!r.ok) sim.mdSays(p, r.msg, 0);
+      } };
+    },
+  };
+}
 for (const key of ['cbc', 'cmp', 'pih', 'upc', 'ts', 'fib', 'mglevel', 'gbs', 'coag']) {
   HANDLERS[key] = { prepare(o, p, sim) { return { ok: true, label: 'Lab: ' + key.toUpperCase(), issues: [], delay: [2, 5], who: 'nurse', run: () => sim.orderLab(p, key) }; } };
 }

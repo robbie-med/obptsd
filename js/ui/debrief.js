@@ -39,7 +39,8 @@ export function showDebrief(sim, ov, { onMenu, onReplay, onSame }) {
     d.className = 'dcard';
     const o = p.outcome, T = p.T;
     const outcomeTxt = o ? `${o.mode === 'cs' ? `Cesarean (${o.urgency}, ${o.csInd})` : o.mode === 'home' ? 'Unattended delivery' : o.vacuum ? 'Vacuum delivery' : 'Spontaneous vaginal'} at ${sim.clock(o.t)} · ${o.neo.liveborn ? `pH ${o.neo.pH}, BD ${o.neo.bd}, Apgars ${o.neo.apgar1}/${o.neo.apgar5}${o.neo.nicu ? ', NICU' : ''}` : 'stillbirth'}`
-      : p.area === 'home' ? 'At home' : p.flags.rescheduled ? 'Induction rescheduled' : 'Undelivered at end of shift';
+      : p.flags.maternalDeath ? `Maternal death at ${sim.clock(p.flags.maternalDeath)}, undelivered` : p.area === 'home' ? 'At home' : p.flags.rescheduled ? 'Induction rescheduled' : 'Undelivered at end of shift';
+    const outcomeLine = (o && p.flags.maternalDeath ? `Maternal death at ${sim.clock(p.flags.maternalDeath)} · ` : '') + (o && o.pmcd ? outcomeTxt.replace(/^Cesarean \([^)]*\)/, 'Resuscitative hysterotomy') : outcomeTxt);
     const pens = sc.pen.filter(x => x.pid === p.id);
     const hidden = [];
     hidden.push(`Placental reserve ${T.plac.toFixed(2)}${T.plac < 0.75 ? ' (poor)' : ''}`);
@@ -60,7 +61,8 @@ export function showDebrief(sim, ov, { onMenu, onReplay, onSame }) {
       return `<tr><td>${sim.clock(s.t)}</td><td>${esc(s.by)}</td><td>${sveString(s)}</td><td>${s.trueDil.toFixed(1)} cm / ${s.trueSta.toFixed(1)}</td><td class="${Math.abs(err) >= 2 ? 'way' : Math.abs(err) >= 1 ? 'off' : ''}">${err >= 0 ? '+' : ''}${err.toFixed(1)}</td></tr>`;
     }).join('');
     d.innerHTML = `<h3>${esc(p.name)} <span class="lead">${p.age}yo G${p.gravida}P${p.para} ${fmtGA(p.gaDays)} · ${esc(p.indication)}${deliveryNTSV(p) ? ' · NTSV' : ''}</span></h3>
-      <div>${esc(outcomeTxt)}${row && row.iolToDelivery ? ` · induction→delivery ${row.iolToDelivery.toFixed(1)} h` : ''}${row && row.csJust ? ` · <span style="color:${row.csJust.ok ? 'var(--green)' : 'var(--red)'}">${row.csJust.ok ? 'CS criteria met' : 'CS criteria NOT met'}</span>` : ''}</div>
+      <div>${esc(outcomeLine)}${row && row.iolToDelivery ? ` · induction→delivery ${row.iolToDelivery.toFixed(1)} h` : ''}${row && row.csJust ? ` · <span style="color:${row.csJust.ok ? 'var(--green)' : 'var(--red)'}">${row.csJust.ok ? 'CS criteria met' : 'CS criteria NOT met'}</span>` : ''}</div>
+      ${row && row.events.length ? `<div class="lead">${row.events.map(esc).join(' · ')}</div>` : ''}
       <canvas></canvas>
       <div class="dgrid"><div><b>What was really going on</b><ul>${hidden.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
         ${(p.truthLog || []).length ? `<b>Timeline</b><ul>${p.truthLog.slice(0, 18).map(x => `<li class="mono">${sim.clock(x.t)} ${esc(x.text)}</li>`).join('')}</ul>` : ''}</div>

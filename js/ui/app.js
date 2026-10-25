@@ -8,6 +8,7 @@ import { CS_INDICATIONS } from '../engine/data.js';
 import { ntsvNow } from '../engine/scoring.js';
 import { drawStrip, drawMini } from './strip.js';
 import { showDebrief } from './debrief.js';
+import { realtimeEmergency, SD_MOVES, mmss } from '../engine/emergency.js';
 
 const $ = (s) => document.querySelector(s);
 const H = 3600, MIN = 60;
@@ -16,7 +17,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;
 const ui = {
   sim: null, selId: null, speed: 0, view: { window: 'paper', live: true, endT: 0, teaching: false },
   tab: 'overview', filter: 'all', msgNodes: new Map(), lastMsgCount: 0, skipFromMsg: 0, lastUrgentSeen: -1,
-  lastRender: 0, carry: 0, replay: false, acted: new Set(), audio: null, ended: false, history: [],
+  lastRender: 0, carry: 0, replay: false, acted: new Set(), audio: null, ended: false, history: [], lastAlarm: 0,
 };
 
 // ------------------------------------------------------------------------ boot / menu
@@ -39,11 +40,12 @@ function showMenu(first = false) {
     </div>
     <div class="row"><label>Seed <input id="seedIn" value="${esc(seed)}" style="width:180px"></label>
       <button id="rndSeed" class="ghost small">🎲</button>
-      <label class="toggle"><input type="checkbox" id="teachIn"> teaching mode (show hidden truth live)</label></div>
+      <label class="toggle"><input type="checkbox" id="teachIn"> teaching mode (show hidden truth live)</label>
+      <label class="toggle" title="Shoulder dystocia ×3, amniotic fluid embolism ×30"><input type="checkbox" id="cloudIn"> ☁ black cloud (the rare disasters stop being rare)</label></div>
     <div class="btnrow">
       <button id="startBtn" class="big-btn">Start shift</button>
       ${ui.sim && !ui.ended ? '<button id="resumeBtn">Resume</button>' : ''}
-      ${last ? `<button id="replayBtn">Replay last night (${esc(last.seed)}, ${last.mode})</button>` : ''}
+      ${last ? `<button id="replayBtn">Replay last night (${esc(last.seed)}, ${last.mode}${last.blackCloud ? ', black cloud' : ''})</button>` : ''}
       ${ui.sim ? '<button id="exportBtn" class="ghost">Export this night (JSON)</button>' : ''}
       <label class="ghost" style="border:1px solid var(--line2);border-radius:6px;padding:4px 9px;cursor:pointer">Import replay… <input type="file" id="importIn" accept=".json" class="hidden"></label>
     </div>
@@ -54,6 +56,7 @@ function showMenu(first = false) {
       <p><b>Wrong orders</b> get nurse pushback, a pharmacy callback — or they quietly go through and hurt someone, depending on who's on.</p>
       <p><b>Nurses are people.</b> Each has a persistent bias and noise on exams, her own Pit style, and her own threshold for calling you. Two exams 20 minutes apart can disagree. Examine her yourself when it matters (it takes time).</p>
       <p><b>Read the strip yourself.</b> The game never labels the category. US paper: FHR 30–240, 3 cm/min. Blue dashed = maternal pulse (watch for pickup). With <code>IUPC</code> the bottom channel is true mmHg.</p>
+      <p><b>Emergencies run in real time.</b> A shoulder dystocia or a maternal code drops the clock to 1× and puts a bar with a timer over the chart. You call the maneuvers (<code>McRoberts</code>, <code>suprapubic pressure</code>, <code>deliver posterior arm</code>, <code>woods screw</code>, <code>gaskin</code>, <code>Zavanelli</code>) or run the code (<code>epinephrine 1 mg IV</code>, <code>LUD</code>, <code>defibrillate</code>, <code>intubate</code>, <code>resuscitative hysterotomy</code>, <code>massive transfusion</code>, <code>cryo 10 units</code>). The rest of the floor keeps going.</p>
       <p><b>One OR, one anesthesiologist.</b> A crash section bumps your scheduled repeat and makes the epidurals wait. You can <code>call backup</code> (30 min).</p>
       <p><b>Scoring</b> is on outcomes (cord gas, NICU, hemorrhage, eclampsia…), with the NTSV cesarean rate tracked so sectioning everyone doesn't win. The debrief reveals the hidden truth next to what you were told.</p>
       <p><b>Keys</b>: <code>space</code> pause · <code>1</code>–<code>4</code> speed · <code>N</code> next page · <code>/</code> order box · <code>E</code> examine · <code>[</code> <code>]</code> prev/next patient.</p>
@@ -63,13 +66,13 @@ function showMenu(first = false) {
   let mode = 'night';
   ov.querySelectorAll('.mode').forEach(el => el.onclick = () => { ov.querySelectorAll('.mode').forEach(x => x.classList.remove('on')); el.classList.add('on'); mode = el.dataset.mode; });
   $('#rndSeed').onclick = () => { $('#seedIn').value = randomSeed(); };
-  $('#startBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode, seed: $('#seedIn').value.trim() || randomSeed(), teaching: $('#teachIn').checked }); };
+  $('#startBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode, seed: $('#seedIn').value.trim() || randomSeed(), teaching: $('#teachIn').checked, blackCloud: $('#cloudIn').checked }); };
   if ($('#resumeBtn')) $('#resumeBtn').onclick = () => ov.classList.remove('show');
-  if ($('#replayBtn')) $('#replayBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode: last.mode, seed: last.seed, replay: last.log }); };
+  if ($('#replayBtn')) $('#replayBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode: last.mode, seed: last.seed, replay: last.log, blackCloud: !!last.blackCloud }); };
   if ($('#exportBtn')) $('#exportBtn').onclick = exportNight;
   $('#importIn').onchange = (e) => {
     const f = e.target.files[0]; if (!f) return;
-    f.text().then(txt => { try { const j = JSON.parse(txt); ov.classList.remove('show'); newGame({ mode: j.mode, seed: j.seed, replay: j.log }); } catch { alert('Not a replay file.'); } });
+    f.text().then(txt => { try { const j = JSON.parse(txt); ov.classList.remove('show'); newGame({ mode: j.mode, seed: j.seed, replay: j.log, blackCloud: !!j.blackCloud }); } catch { alert('Not a replay file.'); } });
   };
   if (first) setSpeed(0);
 }
@@ -79,13 +82,13 @@ function randomSeed() {
 }
 function exportNight() {
   const s = ui.sim;
-  const blob = new Blob([JSON.stringify({ seed: s.seed, mode: s.mode, log: s.cmdLog, endedAt: s.t }, null, 1)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ seed: s.seed, mode: s.mode, blackCloud: s.blackCloud, log: s.cmdLog, endedAt: s.t }, null, 1)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `ld-night-${s.seed}.json`; a.click();
 }
 
-function newGame({ mode, seed, teaching = false, replay = null }) {
+function newGame({ mode, seed, teaching = false, replay = null, blackCloud = false }) {
   document.querySelectorAll('.labpanel').forEach(x => x.remove());
-  ui.sim = new Sim({ seed, mode, teaching });
+  ui.sim = new Sim({ seed, mode, teaching, blackCloud });
   ui.replay = !!replay;
   if (replay) ui.sim.loadReplay(replay);
   ui.view.teaching = teaching; $('#teach').checked = teaching;
@@ -106,8 +109,8 @@ function endShift() {
   if (ui.ended) return;
   ui.ended = true; setSpeed(0);
   const s = ui.sim;
-  if (!ui.replay) { const h = loadHistory(); h.push({ seed: s.seed, mode: s.mode, log: s.cmdLog, t: Date.now() }); saveHistory(h); }
-  showDebrief(s, $('#overlay'), { onMenu: () => showMenu(), onReplay: () => newGame({ mode: s.mode, seed: s.seed, replay: s.cmdLog }), onSame: () => newGame({ mode: s.mode, seed: s.seed }) });
+  if (!ui.replay) { const h = loadHistory(); h.push({ seed: s.seed, mode: s.mode, blackCloud: s.blackCloud, log: s.cmdLog, t: Date.now() }); saveHistory(h); }
+  showDebrief(s, $('#overlay'), { onMenu: () => showMenu(), onReplay: () => newGame({ mode: s.mode, seed: s.seed, replay: s.cmdLog, blackCloud: s.blackCloud }), onSame: () => newGame({ mode: s.mode, seed: s.seed, blackCloud: s.blackCloud }) });
 }
 
 // ------------------------------------------------------------------------ loop
@@ -121,6 +124,9 @@ function frame(now) {
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
   const s = ui.sim;
+  // emergencies are played in real time: no fast-forwarding through a dystocia
+  const fast = () => ui.speed === 'skip' || ui.speed > 1;
+  if (s && !ui.ended && fast() && s.realtimeEmergency()) setSpeed(1);
   if (s && !ui.ended && ui.speed) {
     let n;
     if (ui.speed === 'skip') n = 900; // ~54,000x; stops on the next page
@@ -130,9 +136,11 @@ function frame(now) {
       s.applyReplay();
       s.tick();
       if (ui.speed === 'skip' && s.msgs.length && s.msgs[s.msgs.length - 1].id >= ui.skipFromMsg && s.msgs[s.msgs.length - 1].prio >= 1) { setSpeed(0); break; }
-      if (s.lastUrgentT === s.t && $('#autoslow').checked && (ui.speed === 'skip' || ui.speed > 1)) { setSpeed(1); break; }
+      if (s.lastUrgentT === s.t && $('#autoslow').checked && fast()) { setSpeed(1); break; }
+      if (fast() && s.realtimeEmergency()) { setSpeed(1); break; }
     }
   }
+  if (s && !ui.ended && ui.speed && now - ui.lastAlarm > 2000 && s.realtimeEmergency()) { ui.lastAlarm = now; alarm(); }
   if (s) {
     const p = s.byId[ui.selId];
     if (p) drawStrip($('#strip'), s, p, ui.view);
@@ -149,7 +157,8 @@ function onMsg(m) {
   applyFilter(node, m);
   if (m.pid && m.pid === ui.selId) m.read = true;
   if (m.prio >= 3) {
-    banner(m);
+    const ep = m.pid && ui.sim.byId[m.pid];
+    if (!(ep && realtimeEmergency(ep))) banner(m); // the emergency bar is already shouting about her
     beep(2);
   } else if (m.prio === 2) beep(1);
 }
@@ -213,6 +222,20 @@ function beep(level) {
   } catch { /* no audio */ }
 }
 
+function alarm() {
+  if (!$('#sound').checked) return;
+  try {
+    ui.audio = ui.audio || new (window.AudioContext || window.webkitAudioContext)();
+    const ac = ui.audio, t = ac.currentTime;
+    [988, 784, 988].forEach((f, i) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = f; o.type = 'square';
+      g.gain.setValueAtTime(0.0001, t + i * 0.22); g.gain.exponentialRampToValueAtTime(0.05, t + i * 0.22 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.22 + 0.18);
+      o.connect(g).connect(ac.destination); o.start(t + i * 0.22); o.stop(t + i * 0.22 + 0.2);
+    });
+  } catch { /* no audio */ }
+}
+
 // ------------------------------------------------------------------------ selection & rendering
 function select(pid) {
   ui.selId = pid;
@@ -224,7 +247,55 @@ function select(pid) {
 
 function renderAll() {
   const s = ui.sim; if (!s) return;
-  renderTop(); renderBoard(); renderPatient(); refreshFeed();
+  renderTop(); renderEmerg(); renderBoard(); renderPatient(); refreshFeed();
+}
+
+// Everything here is what the team in the room knows: clocks, what's been tried, the last rhythm
+// check. Never p.T.
+function renderEmerg() {
+  const s = ui.sim, el = $('#emerg');
+  const list = s.patients.filter(p => p.status !== 'gone' && (realtimeEmergency(p) || (p.afe && p.afe.phase === 'rosc')));
+  if (!list.length) { if (!el.classList.contains('hidden')) { el.innerHTML = ''; el.classList.add('hidden'); } return; }
+  el.classList.remove('hidden');
+  const B = (p, label, text) => `<button data-pid="${p.id}" data-order="${esc(text)}"${ui.replay ? ' disabled' : ''}>${esc(label)}</button>`;
+  let h = '';
+  for (const p of list) {
+    const who = `${esc(p.room || '')} · ${esc(p.name)}`;
+    if (p.sd && p.sd.active) {
+      const sd = p.sd;
+      const tried = sd.tries.filter(x => x.ok === false).map(x => SD_MOVES[x.key].label + ' ✗');
+      const now = sd.tries.filter(x => x.ok == null).map(x => SD_MOVES[x.key].label + (x.start > s.t ? ' (next)' : ' …'));
+      h += `<div class="em" data-pid="${p.id}"><div class="emh"><b>SHOULDER DYSTOCIA</b><span>${who}</span><span class="emsub">head out</span><span class="emclock">${mmss(s.t - sd.t0)}</span></div>
+        <div class="emline">${tried.length ? 'Tried: ' + esc(tried.join(', ')) : 'Nothing tried yet.'}${now.length ? ' · Now: ' + esc(now.join(', ')) : ''}${sd.help ? ' · help called' : ''}</div>
+        <div class="emb">${B(p, 'McRoberts', 'McRoberts')}${B(p, 'Suprapubic', 'suprapubic pressure')}${B(p, 'Posterior arm', 'deliver posterior arm')}${B(p, 'Rubin / Woods', 'woods screw')}${B(p, 'All fours', 'gaskin all fours')}${B(p, 'Episiotomy', 'episiotomy')}${B(p, 'Pull harder', 'traction')}${B(p, 'Fundal pressure', 'fundal pressure')}${B(p, 'Zavanelli', 'Zavanelli')}${sd.help ? '' : B(p, 'Call for help', 'call for help')}</div></div>`;
+    }
+    const a = p.afe;
+    if (!a) continue;
+    const pregnant = !p.outcome && p.gaDays >= 140;
+    const blood = B(p, 'MTP', 'massive transfusion') + B(p, 'Cryo 10 u', 'cryo 10 units') + B(p, 'FFP 4 u', 'FFP 4 units') + B(p, 'TXA 1 g', 'TXA 1 g IV') + B(p, 'Fibrinogen', 'fibrinogen');
+    if (a.phase === 'prodrome') {
+      h += `<div class="em" data-pid="${p.id}"><div class="emh"><b>SOMETHING'S WRONG</b><span>${who}</span><span class="emclock">${mmss(s.t - a.t0)}</span></div>
+        <div class="emline">“I feel like I'm going to die.” Short of breath, agitated.</div>
+        <div class="emb">${B(p, 'O₂ NRB', 'O2')}${B(p, 'Vitals', 'vitals')}${B(p, 'Code blue', 'code blue')}</div></div>`;
+    } else if (a.phase === 'collapse') {
+      h += `<div class="em" data-pid="${p.id}"><div class="emh"><b>MATERNAL COLLAPSE</b><span>${who}</span><span class="emclock">${mmss(s.t - a.collapseT)}</span></div>
+        <div class="emline">Gray, gasping, hypotensive.${a.codeT != null ? ' Code called.' : ''}</div>
+        <div class="emb">${a.codeT == null ? B(p, 'Code blue', 'code blue') : ''}${B(p, 'O₂ NRB', 'O2')}${B(p, 'Phenylephrine 100', 'phenylephrine 100 mcg IV')}${B(p, 'Intubate', 'intubate')}${pregnant ? B(p, 'C-section STAT', 'c-section stat for maternal collapse') : ''}${blood}</div></div>`;
+    } else if (a.phase === 'arrest') {
+      const epi = s.lastDose(p, 'epinephrine');
+      const lastEpi = epi && epi.t >= a.arrestT ? `last epi ${mmss(s.t - epi.t)} ago` : 'no epi yet';
+      const rhythm = a.lastCheck ? `${a.lastCheck.rhythm} at ${mmss(a.lastCheck.t - a.arrestT)}` : 'pads going on';
+      const team = a.teamT != null && s.t >= a.teamT ? 'code team here' : a.codeT != null ? 'code team coming' : 'code not called';
+      h += `<div class="em" data-pid="${p.id}"><div class="emh"><b>CODE BLUE</b><span>${who}</span><span class="emsub">no pulse</span><span class="emclock">${mmss(s.t - a.arrestT)}</span></div>
+        <div class="emline">Rhythm: ${esc(rhythm)} · ${lastEpi} · ${team} · ${a.intubated ? 'intubated' : 'bag-mask'}${pregnant ? ` · ${a.lud ? 'LUD on' : 'NO uterine displacement'} · <b>still pregnant</b>${a.hystT != null ? ' — cutting' : ''}` : ''}</div>
+        <div class="emb">${B(p, 'Epi 1 mg IV', 'epinephrine 1 mg IV')}${pregnant && !a.lud ? B(p, 'LUD', 'LUD') : ''}${pregnant && a.hystT == null ? B(p, 'Resuscitative hysterotomy', 'resuscitative hysterotomy') : ''}${B(p, 'Shock', 'defibrillate')}${a.intubated ? '' : B(p, 'Intubate', 'intubate')}${a.codeT == null ? B(p, 'Code blue', 'code blue') : ''}${blood}</div></div>`;
+    } else if (a.phase === 'rosc') {
+      h += `<div class="em post" data-pid="${p.id}"><div class="emh"><b>POST-ARREST</b><span>${who}</span><span class="emsub">ROSC</span><span class="emclock">${mmss(s.t - a.roscT)}</span></div>
+        <div class="emline">Pulse back after ${mmss(a.roscT - a.arrestT)}. ${pregnant ? 'Still pregnant.' : 'Watch the bleeding — AFE means DIC.'}</div>
+        <div class="emb">${B(p, 'Phenylephrine 100', 'phenylephrine 100 mcg IV')}${a.intubated ? '' : B(p, 'Intubate', 'intubate')}${pregnant ? B(p, 'C-section STAT', 'c-section stat for maternal collapse') : ''}${blood}</div></div>`;
+    }
+  }
+  if (el.dataset.html !== h) { el.innerHTML = h; el.dataset.html = h; }
 }
 
 function renderTop() {
@@ -235,7 +306,7 @@ function renderTop() {
   const tri = s.bays.filter(b => b.pid).length;
   const wait = s.waiting.filter(id => { const p = s.byId[id]; return p && p.area === 'waiting'; }).length;
   const or = s.ors.map(o => o.pid ? `<span class="busy">${o.name}: ${esc(s.byId[o.pid].name.split(' ')[0])} (${o.phase})</span>` : o.cleanUntil > s.t ? `<span>${o.name}: cleaning</span>` : `<span>${o.name}: <b>free</b></span>`).join(' ');
-  const an = s.anes.map(a => a.task ? `<span class="busy">${a.short}: ${a.task.kind === 'cs' ? 'in OR' : 'epidural ' + esc(s.byId[a.task.pid]?.room || '')}</span>` : `<span>${a.short}: <b>free</b></span>`).join(' ');
+  const an = s.anes.map(a => a.task ? `<span class="busy">${a.short}: ${a.task.kind === 'cs' ? 'in OR' : a.task.kind === 'code' ? 'CODE ' : 'epidural ' + esc(s.byId[a.task.pid]?.room || '')}</span>` : `<span>${a.short}: <b>free</b></span>`).join(' ');
   const q = s.anesQueue.length ? ` <span class="busy">(${s.anesQueue.length} epidural${s.anesQueue.length > 1 ? 's' : ''} waiting)</span>` : '';
   const nt = ntsvNow(s);
   const ntTxt = nt.tot ? `${nt.cs}/${nt.tot} (${Math.round(nt.rate * 100)}%)` : '—';
@@ -250,6 +321,10 @@ function knownStatus(p, s) {
     if (p.T.pp) { const last = [...p.chart.vitals].reverse().find(v => v.qbl != null); if (last) bits.push(`QBL ${last.qbl}`); }
     return bits.join(' · ');
   }
+  if (p.sd && p.sd.active) return `<b style="color:var(--red)">SHOULDER DYSTOCIA ${mmss(s.t - p.sd.t0)}</b>`;
+  if (p.afe && p.afe.phase === 'arrest') return `<b style="color:var(--red)">CODE BLUE ${mmss(s.t - p.afe.arrestT)}</b>`;
+  if (p.afe && p.afe.phase === 'collapse') return `<b style="color:var(--red)">COLLAPSE</b>`;
+  if (p.flags.maternalDeath) return `Died ${s.clock(p.flags.maternalDeath)}`;
   if (p.area === 'or') return `In ${p.room} — ${p.csRequest ? p.csRequest.urgency : ''} section`;
   if (p.area === 'preop') return `Pre-op · ${p.csRequest ? 'CS at ' + s.clock(p.csRequest.notBefore || p.csRequest.reqT) : ''}`;
   if (p.area === 'triage' || p.area === 'waiting') {
@@ -291,7 +366,7 @@ function truthLine(p) {
   const T = p.T;
   if (!ui.view.teaching) return '';
   const pH = 7.31 - 0.019 * (T.bd - 3) - 0.11 * T.resp;
-  return `<div class="truth">truth: ${T.dil.toFixed(1)} cm, sta ${T.station.toFixed(1)}, R ${T.R.toFixed(2)} · BD ${T.bd.toFixed(1)} pH≈${pH.toFixed(2)} · plac ${T.plac.toFixed(2)}${T.prolapse ? ' · PROLAPSE' : ''}${T.abr ? ' · abruption ' + T.abr.toFixed(2) : ''}${T.infect > 1 ? ' · Triple I' : ''}${T.demise ? ' · DEMISE' : ''}</div>`;
+  return `<div class="truth">truth: ${T.dil.toFixed(1)} cm, sta ${T.station.toFixed(1)}, R ${T.R.toFixed(2)} · BD ${T.bd.toFixed(1)} pH≈${pH.toFixed(2)} · plac ${T.plac.toFixed(2)}${p.sd && p.sd.active ? ` · SD difficulty ×${p.sd.k.toFixed(2)}` : ''}${p.afe ? ` · AFE ${p.afe.phase}${p.afe.phase === 'arrest' ? ' ' + p.afe.rhythm : ''}, fib ${Math.round(T.fib)}` : ''}${T.prolapse ? ' · PROLAPSE' : ''}${T.abr ? ' · abruption ' + T.abr.toFixed(2) : ''}${T.infect > 1 ? ' · Triple I' : ''}${T.demise ? ' · DEMISE' : ''}</div>`;
 }
 function unreadCount(pid) { let n = 0, hi = 0; for (const m of ui.sim.msgs) if (m.pid === pid && !m.read && m.prio >= 1) { n++; hi = Math.max(hi, m.prio); } return [n, hi]; }
 
@@ -524,6 +599,12 @@ function feedback(r) {
 function wire() {
   // the board and chart re-render several times a second: delegate on mousedown so clicks never land on a stale node
   $('#board').addEventListener('mousedown', (e) => { const el = e.target.closest('[data-pid]'); if (el) select(el.dataset.pid); });
+  $('#emerg').addEventListener('mousedown', (e) => {
+    const b = e.target.closest('button[data-order]');
+    const box = e.target.closest('[data-pid]');
+    if (box) select(box.dataset.pid);
+    if (b && !b.disabled && !ui.replay) feedback(ui.sim.command({ type: 'order', pid: b.dataset.pid, text: b.dataset.order }));
+  });
   $('#chart').addEventListener('mousedown', (e) => { const b = e.target.closest('[data-cancel]'); if (b && !ui.replay) ui.sim.command({ type: 'cancel', oid: +b.dataset.cancel }); });
   $('#orderHints').innerHTML = ORDER_HINTS.map(h => `<option value="${esc(h)}">`).join('');
   const inp = $('#orderInput');
@@ -616,6 +697,7 @@ function renderLab() {
   ui.tab = 'truth'; ui.view.teaching = true; s.teaching = true; $('#teach').checked = true;
 }
 
+window.ldNight = ui; // console handle for debugging / drills
 wire();
 requestAnimationFrame(frame);
 showMenu(true);

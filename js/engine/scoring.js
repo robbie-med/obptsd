@@ -1,6 +1,7 @@
 // Scoring & debrief (SPEC §7). Outcomes, NTSV cesarean rate, process metrics, and the hidden
 // truth laid next to what you were told.
 import { deliveryNTSV } from './patient.js';
+import { SD_MOVES, mmss } from './emergency.js';
 
 const H = 3600, MIN = 60;
 
@@ -47,7 +48,7 @@ export function computeScore(sim) {
     const row = { p, outcome: o, events: [], harms: p.harms || [] };
     if (o) {
       const neo = o.neo;
-      if (deliveryNTSV(p) && o.mode !== 'home') { ntsvTotal++; if (o.mode === 'cs') ntsvCS++; }
+      if (deliveryNTSV(p) && o.mode !== 'home' && !o.pmcd) { ntsvTotal++; if (o.mode === 'cs') ntsvCS++; }
       if (!neo.liveborn) add(p, 40, 'Stillbirth');
       else {
         if (neo.death) add(p, 35, 'Neonatal death');
@@ -56,6 +57,7 @@ export function computeScore(sim) {
         else if (neo.pH < 7.1) add(p, 5, `Acidemia (pH ${neo.pH})`);
         if (neo.sepsis) add(p, 8, 'Early-onset sepsis');
         if (neo.notes.includes('Brachial plexus injury')) add(p, 5, 'Brachial plexus injury');
+        if (neo.notes.includes('Humerus fracture')) add(p, 2, 'Humerus fracture');
         if (neo.nicu && p.gaDays >= 245 && !neo.hie && neo.pH >= 7.0) add(p, 3, 'NICU admission');
       }
       if (o.mode === 'home') add(p, 10, 'Unattended delivery after discharge/phone advice');
@@ -109,6 +111,37 @@ export function computeScore(sim) {
       if (T.bd > 10 || T.demise) add(p, 15, 'Compromised fetus at home');
     }
     if (p.flags.rescheduled) row.events.push('Induction rescheduled');
+    const sd = p.sd;
+    if (sd && sd.endT != null) {
+      const moves = sd.tries.filter(x => x.ok === true || x.ok === false).map(x => `${SD_MOVES[x.key].label}${x.by === 'nurse' ? ' (RN)' : x.by === 'backup' ? ' (backup OB)' : ''} ${x.ok ? '✓' : '✗'}`);
+      row.events.push(`Shoulder dystocia: ${sd.zavanelli ? 'Zavanelli → STAT CS' : 'head-to-body ' + mmss(sd.hbdi)} · ${moves.join(', ')}`);
+      if (sd.traction >= 2) add(p, 3, 'Repeated traction on the fetal head during shoulder dystocia');
+      if (sd.backup) add(p, 4, 'Shoulder dystocia still undelivered when the backup OB walked in');
+    }
+    const a = p.afe;
+    if (a) {
+      const bits = [`AFE ${sim.clock(a.t0)}`];
+      if (a.arrestT != null) bits.push(`arrest ${sim.clock(a.arrestT)} (${a.rhythm})`);
+      if (a.roscT != null) bits.push(`ROSC after ${mmss(a.roscT - a.arrestT)}`);
+      if (a.hystT != null && o && o.pmcd) bits.push(`hysterotomy: baby out ${mmss(o.t - a.arrestT)} into the arrest`);
+      if (a.deathT != null) bits.push('maternal death');
+      row.events.push(bits.join(' · '));
+      // [AHA2015] judged on the response; AFE itself is neither predictable nor preventable
+      if (a.arrestT != null) {
+        if (a.undeliveredAtArrest) {
+          const end = o ? o.t : (a.roscT ?? a.deathT ?? sim.t);
+          const d = (end - a.arrestT) / MIN;
+          row.arrestToDelivery = o ? d : null;
+          if (!o && a.roscT == null) add(p, 10, 'Never delivered during the maternal arrest (AHA: hysterotomy at 4 min, baby out by 5)');
+          else if (o && o.t < (a.roscT ?? Infinity) && d > 5) add(p, Math.min(10, Math.round(d - 5) + 3), `Arrest-to-delivery ${d.toFixed(1)} min (AHA: baby out by 5)`);
+          if (!a.lud && !(o && o.t - a.arrestT < 90)) add(p, 3, 'No left uterine displacement during CPR');
+        }
+        const epiLate = a.firstEpiT == null ? (a.roscT ?? a.deathT ?? sim.t) - a.arrestT > 5 * MIN : a.firstEpiT - a.arrestT > 5 * MIN;
+        if (epiLate) add(p, 3, 'No IV epinephrine in the first 5 minutes of the arrest');
+        if (a.badShock) add(p, 2, 'Shocked a non-shockable rhythm');
+      }
+      if (a.deathT != null) add(p, 30, 'Maternal death (AFE kills even with perfect care)');
+    }
     rows.push(row);
   }
   const ntsvRate = ntsvTotal ? ntsvCS / ntsvTotal : null;
@@ -121,6 +154,6 @@ export function computeScore(sim) {
 
 export function ntsvNow(sim) {
   let tot = 0, cs = 0;
-  for (const p of sim.patients) if (p.outcome && p.outcome.mode !== 'home' && deliveryNTSV(p)) { tot++; if (p.outcome.mode === 'cs') cs++; }
+  for (const p of sim.patients) if (p.outcome && p.outcome.mode !== 'home' && !p.outcome.pmcd && deliveryNTSV(p)) { tot++; if (p.outcome.mode === 'cs') cs++; }
   return { tot, cs, rate: tot ? cs / tot : null };
 }

@@ -3,6 +3,8 @@
 import { Sim } from '../js/engine/sim.js';
 import { parseOrder } from '../js/engine/orders.js';
 import { analyzeStrip } from '../js/engine/monitor.js';
+import { startShoulder, startAFE } from '../js/engine/emergency.js';
+import { computeScore } from '../js/engine/scoring.js';
 
 let fails = 0, passes = 0;
 function check(name, cond, info = '') {
@@ -122,6 +124,94 @@ console.log('magnesium PK');
   const [sim2, q] = single('mag2', (sim, p) => { p.weightKg = 85; p.T.cr = 1.8; p.nurseId = null; });
   sim2.startMag(q, 4, 2); sim2.run(10 * H);
   check('renal impairment accumulates toward toxicity', q.T.mg > 9, q.T.mg.toFixed(1));
+}
+
+console.log('shoulder dystocia');
+{
+  const o = (t) => parseOrder(t).id;
+  check('maneuver aliases', o('McRoberts') === 'mcroberts' && o('suprapubic pressure') === 'suprapubic' && o('deliver the posterior arm') === 'posterior'
+    && o('woods screw') === 'rotational' && o('gaskin') === 'gaskin' && o('fundal pressure') === 'fundal' && o('fundal massage') === 'massage' && o('hands and knees') === 'reposition');
+  const run = (seed, plan) => {
+    const sim = new Sim({ seed, mode: 'single' });
+    const p = sim.patients[0];
+    Object.assign(p.T, { dil: 10, complete: true, station: 4, laborOnset: true, rom: true, deliveredFlag: true, efw: 4300 });
+    startShoulder(sim, p, {});
+    for (const t of plan) sim.command({ type: 'order', pid: p.id, text: t });
+    sim.run(14 * 60);
+    return p;
+  };
+  const none = [], helperr = [];
+  for (let i = 0; i < 10; i++) {
+    none.push(run('sd' + i, []));
+    helperr.push(run('sd' + i, ['call for help', 'McRoberts', 'suprapubic pressure', 'deliver posterior arm']));
+  }
+  check('every dystocia ends in a birth within 14 min', [...none, ...helperr].every(p => p.outcome && p.outcome.mode === 'vaginal'));
+  const hb = (arr) => median(arr.map(p => p.sd.hbdi));
+  check('maneuvers shorten head-to-body interval', hb(helperr) < hb(none) - 60, `HELPERR ${hb(helperr)} s vs waiting ${hb(none)} s`);
+  const pH = (arr) => median(arr.map(p => p.outcome.neo.pH));
+  check('waiting costs pH', pH(none) < pH(helperr) - 0.03, `${pH(helperr)} vs ${pH(none)}`);
+  const all = [...none, ...helperr].sort((a, b) => a.sd.hbdi - b.sd.hbdi);
+  check('long intervals come out depressed', median(all.slice(-5).map(p => p.outcome.neo.apgar5)) < median(all.slice(0, 5).map(p => p.outcome.neo.apgar5)));
+  const f = run('sdf', ['fundal pressure', 'yes']);
+  check('fundal pressure gets nurse pushback or harm', f.chart.orders[0].status === 'held_nurse' || (f.harms || []).some(h => h.kind === 'fundal_pressure'));
+}
+
+console.log('amniotic fluid embolism / maternal arrest');
+{
+  const o = (t) => parseOrder(t).id;
+  check('code aliases', o('perimortem c-section') === 'hysterotomy' && o('epinephrine 1 mg IV') === 'epinephrine' && o('LUD') === 'lud' && o('defibrillate') === 'defib'
+    && o('cryo 10 units') === 'cryo' && parseOrder('cryo 10 units').units === 10 && o('massive transfusion') === 'transfuse');
+  let arrests = 0, cuts = 0, fibLow = 0, quickDelivery = 0, roscResp = 0, roscNone = 0, epiHeld = 0;
+  for (let i = 0; i < 10; i++) {
+    for (const respond of [true, false]) {
+      const sim = new Sim({ seed: 'afe' + i, mode: 'single' });
+      const p = sim.patients[0];
+      Object.assign(p.T, { dil: 6, laborOnset: true, rom: true, S: 0.7, R: 0.9 });
+      startAFE(sim, p);
+      let acted = false, cut = false;
+      for (let k = 0; k < 6 * 40; k++) {
+        sim.run(10);
+        const a = p.afe;
+        if (respond && a.phase === 'arrest' && !acted) {
+          acted = true;
+          for (const t of ['LUD', 'epinephrine 1 mg IV']) sim.command({ type: 'order', pid: p.id, text: t });
+        }
+        if (respond && a.phase === 'arrest' && !cut && sim.t - a.arrestT >= 230) { cut = true; sim.command({ type: 'order', pid: p.id, text: 'resuscitative hysterotomy' }); }
+      }
+      const a = p.afe;
+      if (a.arrestT != null) {
+        if (respond) arrests++;
+        if (cut) cuts++;
+        if (cut && p.outcome && p.outcome.t - a.arrestT < 6.5 * 60) quickDelivery++;
+        if (respond && a.roscT != null) roscResp++;
+        if (!respond && a.roscT != null) roscNone++;
+        if (respond && p.chart.orders.some(x => /Epinephrine/.test(x.label) && x.status !== 'done')) epiHeld++;
+      }
+      if (p.T.fib < 200) fibLow++;
+    }
+  }
+  check('most AFEs arrest', arrests >= 4, `${arrests}/10`);
+  check('DIC: fibrinogen < 200 within 40 min', fibLow >= 15, `${fibLow}/20`);
+  check('hysterotomy at 4 min delivers within ~6 min of arrest', cuts > 0 && quickDelivery === cuts, `${quickDelivery}/${cuts} (others had ROSC before 4 min)`);
+  check('code epinephrine is not held by pharmacy', epiHeld === 0);
+  check('LUD + epi + hysterotomy beats doing nothing', roscResp > roscNone, `ROSC ${roscResp} vs ${roscNone}`);
+}
+
+console.log('black cloud');
+{
+  let sd = 0, afe = 0;
+  for (const seed of ['bc1', 'bc2', 'bc3', 'bc4', 'bc5', 'bc6']) {
+    const sim = new Sim({ seed, mode: 'night', blackCloud: true });
+    sim.run(12 * H);
+    sd += sim.patients.filter(p => p.sd).length; afe += sim.patients.filter(p => p.afe).length;
+    computeScore(sim);
+  }
+  check('black-cloud nights produce dystocias and AFEs', sd + afe >= 2, `${sd} SD, ${afe} AFE over 6 nights (no orders)`);
+  const a = new Sim({ seed: 'bcrep', mode: 'night', blackCloud: true }); a.run(2 * H);
+  a.command({ type: 'order', pid: a.patients[1].id, text: 'pit up 2' }); a.run(4 * H);
+  const b = new Sim({ seed: 'bcrep', mode: 'night', blackCloud: true }); b.loadReplay(a.cmdLog); b.run(6 * H);
+  const sig = (s) => s.patients.map(p => p.T.dil.toFixed(6) + p.T.bd.toFixed(6) + (p.afe ? p.afe.phase : '') + (p.sd ? p.sd.hbdi : '')).join('|') + s.msgs.length;
+  check('black-cloud replay reproduces', sig(a) === sig(b));
 }
 
 console.log('full night smoke test');

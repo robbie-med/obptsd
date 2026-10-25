@@ -7,8 +7,8 @@ const H = 3600;
 const nights = +(process.argv[2] || 4);
 let crashes = 0;
 
-function play(seed, mode) {
-  const sim = new Sim({ seed, mode });
+function play(seed, mode, blackCloud = false) {
+  const sim = new Sim({ seed, mode, blackCloud });
   const r = sim.rng.fork('bot');
   const seen = new Set();
   const step = () => {
@@ -54,22 +54,23 @@ function play(seed, mode) {
 
 for (let i = 0; i < nights; i++) {
   const seed = 'bot-' + i;
-  for (const mode of ['night', 'quick']) {
+  for (const [mode, cloud] of [['night', false], ['quick', false], ['night', true]]) {
     try {
       const t0 = Date.now();
-      const sim = play(seed, mode);
+      const sim = play(seed, mode, cloud);
       const sc = computeScore(sim);
       const del = sim.patients.filter(p => p.outcome);
       const cs = del.filter(p => p.outcome.mode === 'cs').length;
-      console.log(`${mode} ${seed}: ${Date.now() - t0} ms · ${sim.patients.length} pts · ${del.length} deliveries (${cs} CS) · score ${sc.score} ${sc.grade} · ${sim.cmdLog.length} cmds · pen ${sc.pen.length}`);
+      const emerg = sim.patients.filter(p => p.sd).length + ' SD, ' + sim.patients.filter(p => p.afe).length + ' AFE';
+      console.log(`${mode}${cloud ? '+cloud' : ''} ${seed}: ${emerg} · ${Date.now() - t0} ms · ${sim.patients.length} pts · ${del.length} deliveries (${cs} CS) · score ${sc.score} ${sc.grade} · ${sim.cmdLog.length} cmds · pen ${sc.pen.length}`);
       // replay must reproduce exactly
-      const re = new Sim({ seed, mode }); re.loadReplay(sim.cmdLog);
+      const re = new Sim({ seed, mode, blackCloud: cloud }); re.loadReplay(sim.cmdLog);
       while (!re.ended) re.run(600);
-      const sig = (s) => s.patients.map(p => p.T.dil.toFixed(5) + ':' + p.T.bd.toFixed(5) + ':' + (p.outcome ? p.outcome.t : '-')).join('|');
+      const sig = (s) => s.patients.map(p => p.T.dil.toFixed(5) + ':' + p.T.bd.toFixed(5) + ':' + (p.outcome ? p.outcome.t : '-') + ':' + (p.afe ? p.afe.phase : '')).join('|');
       if (sig(re) !== sig(sim)) { console.log('  REPLAY MISMATCH'); crashes++; }
     } catch (e) {
       crashes++;
-      console.log(`${mode} ${seed}: CRASH`, e.stack);
+      console.log(`${mode}${cloud ? '+cloud' : ''} ${seed}: CRASH`, e.stack);
     }
   }
 }

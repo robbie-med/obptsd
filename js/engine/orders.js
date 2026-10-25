@@ -71,6 +71,25 @@ const ALIASES = {
   returnor: ['return to or', 'back to the or', 'exploratory laparotomy', 'ex lap', 'hysterectomy', 'b-lynch'],
   elevate: ['elevate presenting part', 'elevate the head', 'elevate head', 'elevate', 'knee chest', 'knee-chest'],
   backup: ['call backup', 'backup team', 'second team', 'call in backup', 'backup anesthesia', 'call the backup'],
+  // shoulder dystocia [ACOG-PB178]
+  mcroberts: ['mcroberts', 'mc roberts', 'mcrobert', 'legs back', 'hyperflex'],
+  suprapubic: ['suprapubic pressure', 'suprapubic', 'mazzanti'],
+  posterior: ['deliver the posterior arm', 'deliver posterior arm', 'posterior arm', 'posterior shoulder', 'jacquemier'],
+  rotational: ['reverse woods', 'woods screw', 'woods corkscrew', 'woods', 'rubin', 'corkscrew', 'rotational maneuver', 'rotate the shoulders'],
+  gaskin: ['gaskin', 'all fours', 'all-fours', 'all 4s'],
+  episiotomy: ['cut an episiotomy', 'episiotomy', 'episio'],
+  traction: ['pull harder', 'pull on the head', 'traction'],
+  fundal: ['fundal pressure'],
+  zavanelli: ['zavanelli', 'cephalic replacement', 'push the head back'],
+  help: ['call for help', 'call help', 'call nicu', 'call peds', 'nicu to the room', 'peds to the room', 'neonatal team', 'emergency button', 'help'],
+  // maternal arrest [AHA2015]
+  code: ['code blue', 'call a code', 'call the code', 'call code', 'start cpr', 'cpr', 'chest compressions', 'compressions'],
+  lud: ['left uterine displacement', 'uterine displacement', 'displace the uterus', 'lud'],
+  defib: ['defibrillate', 'defibrillation', 'defib', 'shock her', 'shock', 'cardiovert'],
+  hysterotomy: ['resuscitative hysterotomy', 'perimortem cesarean', 'perimortem c-section', 'perimortem section', 'perimortem', 'hysterotomy', 'pmcd'],
+  intubate: ['intubate', 'intubation', 'secure the airway', 'airway'],
+  cryo: ['cryoprecipitate', 'fibrinogen concentrate', 'cryo'],
+  ffp: ['fresh frozen plasma', 'ffp', 'plasma'],
   removeFse: [],
 };
 
@@ -188,12 +207,13 @@ export function parseOrder(raw) {
       : has(/arrest of desc|descent|failure to descend/) ? 'arrest_desc' : has(/arrest|ftp|failure to progress|protraction/) ? 'arrest_dil'
       : has(/failed (iol|induction)|failed ind/) ? 'failed_iol' : has(/breech|malpres|transverse|footling/) ? 'malpres'
       : has(/failed (vac|ovd|forceps|operative)/) ? 'failed_ovd' : has(/repeat|rcs|rlts/) ? 'repeat'
-      : has(/request|wants|asking/) ? 'request' : has(/preeclampsia|pre-eclampsia|severe feat|hellp/) ? 'severe_pe'
+      : has(/shoulder|zavanelli/) ? 'shoulder' : has(/request|wants|asking/) ? 'request' : has(/preeclampsia|pre-eclampsia|severe feat|hellp/) ? 'severe_pe'
       : has(/decel|brady|tracing|fhr|cat ?(3|iii|2|ii)|non-?reassuring|nrfht|distress|fetal intol/) ? 'cat3' : null;
   }
-  if (o.id === 'transfuse') {
+  if (o.id === 'transfuse' || o.id === 'cryo' || o.id === 'ffp') {
     const n = qty.find(q => !q.unit || q.unit === 'units');
-    o.units = n ? n.value : (has(/mtp|massive/) ? 4 : 2);
+    o.mtp = has(/mtp|massive/);
+    o.units = n ? n.value : o.id === 'cryo' ? 10 : o.id === 'ffp' ? 4 : (o.mtp ? 4 : 2);
   }
   return o;
 }
@@ -225,4 +245,7 @@ export const ORDER_HINTS = [
   'fundal massage', 'bakri', 'transfuse 2 units', 'return to OR', 'push', 'labor down', 'stop pushing', 'vacuum',
   'c-section stat', 'c-section urgent for arrest of dilation', 'bedside US', 'CBC', 'PIH labs', 'UPC', 'type and screen',
   'fibrinogen', 'mag level', 'vitals', 'NST', 'ROM test', 'admit', 'discharge', 'observe 2 hours', 'VAS', 'elevate presenting part', 'call backup',
+  'McRoberts', 'suprapubic pressure', 'deliver posterior arm', 'woods screw', 'gaskin all fours', 'episiotomy', 'Zavanelli', 'call for help',
+  'code blue', 'epinephrine 1 mg IV', 'left uterine displacement', 'defibrillate', 'intubate', 'resuscitative hysterotomy',
+  'massive transfusion', 'cryo 10 units', 'FFP 4 units',
 ];

@@ -15,6 +15,7 @@
 import { ZHANG_HOURS_PER_CM } from './data.js';
 import { clamp, bateman } from './util.js';
 import { pushSample } from './monitor.js';
+import { erng, AFE_PER_LABOR_HOUR } from './emergency.js';
 
 const H = 3600;
 
@@ -485,8 +486,34 @@ function maternalStep(p, sim, E, t, dt) {
   if (dx.preE === 'severe') T.cr += 0.01 * dt / H;
   if (T.abr > 0 && !T.pp) T.qblAntepartum += (T.abr * 3) * dt / 60;
 
+  if (p.afe) afeStep(p, sim, E, t, dt);
+
   // MHR channel
   T.mhr = T.hr + 2 * Math.sin(t / 7) ;
+}
+
+// Amniotic fluid embolism / maternal arrest on top of everything else (emergency.js runs the
+// state machine). Consumptive coagulopathy, then hypoxia and vasoplegia, then no pulse.
+function afeStep(p, sim, E, t, dt) {
+  const T = p.T, a = p.afe;
+  if (a.dicT0 != null && t - a.dicT0 < 40 * 60) T.fib = Math.max(40, T.fib - a.dicRate * dt / 60);
+  if (a.phase === 'prodrome') { T.spo2 = Math.max(55, T.spo2 - 4); T.hr = Math.min(190, T.hr + 15); return; }
+  if (a.phase === 'arrest') {
+    // CPR perfusion: nurses first, then a rotating code team; aortocaval compression until LUD/delivery
+    const cpr = (a.teamT != null && t >= a.teamT ? 1 : 0.8) * (!p.outcome && p.gaDays >= 140 && !a.lud ? 0.7 : 1);
+    T.sbp = 55 * cpr; T.dbp = 18 * cpr; T.map = (T.sbp + 2 * T.dbp) / 3;
+    T.hr = 0; T.spo2 = 55; T.rr = a.intubated ? 12 : 0;
+    return;
+  }
+  let hit = 0;
+  if (a.phase === 'collapse') hit = a.willArrest ? 1 : Math.max(0.35, Math.exp(-Math.max(0, t - a.collapseT - 180) / 900));
+  else if (a.phase === 'rosc') hit = 0.8 * Math.exp(-(t - a.roscT) / 2400);
+  if (!hit) return;
+  hit *= a.sev;
+  T.sbp = clamp(T.sbp - 60 * hit, 45, 250); T.dbp = clamp(Math.min(T.dbp - 35 * hit, T.sbp * 0.6), 25, 150); T.map = (T.sbp + 2 * T.dbp) / 3;
+  T.spo2 = clamp(Math.min(T.spo2, 99 - 30 * hit + (p.meds.o2 ? 6 : 0) + (a.intubated ? 16 : 0)), 55, 100);
+  T.hr = clamp(T.hr + 35 * hit, 35, 190);
+  T.rr = clamp(T.rr + 12 * hit, 0, 40);
 }
 
 function shockDrop(p) {
@@ -514,6 +541,10 @@ export function abxActive(p, t, kind) {
 function fetalStep(p, sim, E, t, dt) {
   const T = p.T, r = T.rng;
   if (T.demise) { T.fhr = NaN; for (let k = 0; k < 4; k++) pushSample(p, sim, t + k * 0.25, NaN); return; }
+  // head delivered, chest trapped: ~0.02 pH/min [Leung2011]; maternal arrest: no uterine perfusion at all
+  if (T.sdActive) T.bd += 1.1 * T.fragility * dt / 60;
+  if (T.zav) T.bd += 0.5 * T.fragility * dt / 60;
+  if (p.afe && p.afe.phase === 'arrest') T.bd += 1.4 * T.fragility * dt / 60;
   // uteroplacental flow
   const mapF = T.map >= 72 ? 1 : clamp(1 - (72 - T.map) * 0.022, 0.25, 1);
   const U = clamp(1 - Math.max(0, T.iup - 20) / 100, 0.08, 1) * mapF * (1 - 0.8 * T.abr) * (T.rupture ? 0.15 : 1);
@@ -634,6 +665,11 @@ function hazardStep(p, sim, E, t, dt) {
   if (T.mgEff >= 12 && !T.flagMgResp) { T.flagMgResp = true; sim.emit(p, 'mag_resp'); }
   if (T.mgEff >= 22 && !T.flagMgArrest) { T.flagMgArrest = true; sim.emit(p, 'mag_arrest'); }
   if (T.infect > 1 && !T.flagFever) { T.flagFever = true; }
+  // amniotic fluid embolism [SMFM-AFE2016]: laboring, membranes ruptured; induction and age raise it
+  if (!p.afe && T.rom && T.laborOnset && (p.area === 'ldr' || p.area === 'triage' || p.area === 'or')) {
+    const h = AFE_PER_LABOR_HOUR * (p.meds.pit.rate > 0 ? 1.5 : 1) * (p.age >= 35 ? 1.5 : 1) * sim.rare.afe;
+    if (erng(p).chance(h * dt / H)) sim.emit(p, 'afe');
+  }
 }
 
 export function doROM(p, sim, artificial) {
@@ -670,10 +706,17 @@ export function neonatalOutcome(p, sim, mode, extra = {}) {
   if (mode === 'cs' && extra.ga) a5 -= 0.3;
   let shoulder = false;
   if (mode !== 'cs') {
+    // births on the floor already played the dystocia out live (emergency.js); the draw stays so the
+    // stream lines up for everyone else
     const sdRisk = T.efw > 4500 ? 0.12 : T.efw > 4000 ? 0.05 : 0.01;
-    shoulder = r.chance(sdRisk * (p.dx.gdm ? 1.8 : 1) * (extra.vacuum ? 1.6 : 1));
-    if (shoulder) { a5 -= r.range(0, 2); notes.push('Shoulder dystocia'); T.bd += r.range(1, 4); }
+    const roll = r.chance(sdRisk * (p.dx.gdm ? 1.8 : 1) * (extra.vacuum ? 1.6 : 1));
+    shoulder = extra.sdChecked ? !!extra.shoulder : roll;
+    // a trapped chest is asphyxia the gas undersells: babies come out depressed well before pH 7.0
+    if (shoulder && extra.hbdiSec != null) a5 -= clamp((extra.hbdiSec / 60 - 2) * 0.8, 0, 6);
+    if (shoulder && extra.hbdiSec != null) notes.push(`Shoulder dystocia (head-to-body ${Math.floor(extra.hbdiSec / 60)}:${String(Math.floor(extra.hbdiSec % 60)).padStart(2, '0')})`);
+    else if (shoulder) { a5 -= r.range(0, 2); notes.push('Shoulder dystocia'); T.bd += r.range(1, 4); }
   }
+  if (extra.pmcd) notes.push('Delivered by resuscitative hysterotomy');
   if (extra.breechVaginal) { a5 -= r.range(0, 4); notes.push('Vaginal breech delivery'); }
   a5 = Math.round(clamp(a5 + r.normal(0, 0.5), 0, 10));
   const a1 = Math.round(clamp(a5 - r.range(0.5, 3), 0, 9));
@@ -681,12 +724,16 @@ export function neonatalOutcome(p, sim, mode, extra = {}) {
   const gbsRisk = (p.gbsTrue === 'pos' && !p.gbsAdequate) ? 0.02 : 0;
   const sepsis = r.chance(sepsisRisk + gbsRisk);
   if (sepsis) notes.push('Early-onset sepsis');
-  const hie = pH < 7.0 && T.bd >= 12 && r.chance(a5 <= 5 ? 0.6 : 0.2);
+  // [Leung2011] HIE climbs once the head-to-body interval passes ~5 min, beyond what the gas shows
+  const hbdiMin = (extra.hbdiSec || 0) / 60;
+  const hie = (pH < 7.0 && T.bd >= 12 && r.chance(a5 <= 5 ? 0.6 : 0.2)) || (hbdiMin > 5 && r.chance(clamp(0.05 * (hbdiMin - 5), 0, 0.5)));
   if (hie) notes.push('HIE — therapeutic hypothermia');
-  const death = T.bd > 20 && r.chance(0.35);
+  const death = (T.bd > 20 && r.chance(0.35)) || (hbdiMin > 10 && r.chance(0.15 * (extra.peds ? 0.6 : 1)));
   if (T.fluid === 'mec' && a5 < 7) notes.push('Meconium, non-vigorous');
   const nicu = gaW < 35 || a5 < 7 || pH < 7.05 || T.bd >= 12 || sepsis || hie || (shoulder && r.chance(0.3)) || (T.efw < 2000);
-  if (extra.brachial || (shoulder && r.chance(0.12))) notes.push('Brachial plexus injury');
+  if (extra.brachial || (shoulder && !extra.sdChecked && r.chance(0.12))) notes.push('Brachial plexus injury');
+  if (extra.humerus) notes.push('Humerus fracture');
+  if (extra.clavicle) notes.push('Clavicle fracture');
   return { liveborn: true, pH: Math.round(pH * 100) / 100, bd: Math.round(T.bd * 10) / 10, apgar1: a1, apgar5: a5, nicu, hie, death, sepsis, shoulder, sex: T.sex, weight: T.efw, notes };
 }
 
@@ -704,6 +751,7 @@ export function startPostpartum(p, sim, mode, extra = {}) {
   if (extra.secondStageH > 3) risk += 0.08;
   if (T.abr > 0.3) risk += 0.12;
   if (extra.ga) risk += 0.1;
+  if (extra.shoulder) risk += 0.1;
   const atony = r.chance(0.04 + risk);
   T.pp = {
     mode, t0: sim.t, tone: mode === 'cs' ? 0.7 : 0.6,
@@ -725,6 +773,7 @@ function postpartumStep(p, sim, E, t, dt) {
   pp.tone += (target - pp.tone) * dt / 240;
   let bleed = 520 * Math.pow(1 - pp.tone, 2.3) + pp.lac * Math.exp(-s / 1800) + pp.surgicalBleed * Math.exp(-s / 900);
   if (T.fib < 200 || pp.qbl > 2000) bleed *= 1.3;
+  if (T.fib < 150) bleed *= 1 + (150 - T.fib) / 60; // consumptive coagulopathy: nothing clots
   if (E.txa > 0.2) bleed *= 0.78;
   if (pp.hyst) bleed = 0.5;
   pp.bleed = bleed;
