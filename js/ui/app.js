@@ -1,0 +1,621 @@
+// UI shell. Reads sim state for display and sends player input only through sim.command(),
+// so every night is replayable from (seed, command log).
+import { Sim } from '../engine/sim.js';
+import { parseOrder, describeParsed, ORDER_HINTS } from '../engine/orders.js';
+import { sveString } from '../engine/nurses.js';
+import { fmtDur, fmtGA, clamp } from '../engine/util.js';
+import { CS_INDICATIONS } from '../engine/data.js';
+import { ntsvNow } from '../engine/scoring.js';
+import { drawStrip, drawMini } from './strip.js';
+import { showDebrief } from './debrief.js';
+
+const $ = (s) => document.querySelector(s);
+const H = 3600, MIN = 60;
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const ui = {
+  sim: null, selId: null, speed: 0, view: { window: 'paper', live: true, endT: 0, teaching: false },
+  tab: 'overview', filter: 'all', msgNodes: new Map(), lastMsgCount: 0, skipFromMsg: 0, lastUrgentSeen: -1,
+  lastRender: 0, carry: 0, replay: false, acted: new Set(), audio: null, ended: false, history: [],
+};
+
+// ------------------------------------------------------------------------ boot / menu
+function loadHistory() { try { return JSON.parse(localStorage.getItem('obfloor.history') || '[]'); } catch { return []; } }
+function saveHistory(h) { try { localStorage.setItem('obfloor.history', JSON.stringify(h.slice(-20))); } catch { /* storage unavailable */ } }
+
+function showMenu(first = false) {
+  const hist = loadHistory();
+  const last = hist[hist.length - 1];
+  const ov = $('#overlay');
+  const seed = ui.sim ? ui.sim.seed : randomSeed();
+  ov.innerHTML = `<div class="dlg">
+    <h1>L&amp;D Night</h1>
+    <p class="lead">You're the OB on the labor floor. You don't catch babies — you manage everything up to delivery: triage, inductions, Pit, magnesium, the strip, and when to call the section. Every patient has a hidden physiology; you only see it through the monitor and your nurses.</p>
+    <div class="modes">
+      <div class="mode on" data-mode="night"><b>Night shift</b><span>19:00 → 07:00. Sign-out from days, a full board, walk-ins, phone calls, one OR, one anesthesiologist.</span></div>
+      <div class="mode" data-mode="quick"><b>Short shift</b><span>19:00 → 23:00. Three patients on the floor, a scheduled section, some walk-ins.</span></div>
+      <div class="mode" data-mode="single"><b>Single patient</b><span>One unripe G1 induction and her nurse. Ripening, Pit titration, SVEs. No chaos.</span></div>
+      <div class="mode" data-mode="lab"><b>Tracing lab</b><span>Watch the FHR/toco generator and turn the hidden knobs: placental reserve, Pit, cord, hypotension.</span></div>
+    </div>
+    <div class="row"><label>Seed <input id="seedIn" value="${esc(seed)}" style="width:180px"></label>
+      <button id="rndSeed" class="ghost small">🎲</button>
+      <label class="toggle"><input type="checkbox" id="teachIn"> teaching mode (show hidden truth live)</label></div>
+    <div class="btnrow">
+      <button id="startBtn" class="big-btn">Start shift</button>
+      ${ui.sim && !ui.ended ? '<button id="resumeBtn">Resume</button>' : ''}
+      ${last ? `<button id="replayBtn">Replay last night (${esc(last.seed)}, ${last.mode})</button>` : ''}
+      ${ui.sim ? '<button id="exportBtn" class="ghost">Export this night (JSON)</button>' : ''}
+      <label class="ghost" style="border:1px solid var(--line2);border-radius:6px;padding:4px 9px;cursor:pointer">Import replay… <input type="file" id="importIn" accept=".json" class="hidden"></label>
+    </div>
+    <h2>How to play</h2>
+    <div class="help">
+      <p><b>Select a patient</b> on the board (left). Her strip, vitals and chart are in the middle; pages from nurses, pharmacy, lab and anesthesia land on the right.</p>
+      <p><b>Write orders in free text</b>: <code>pit per protocol</code>, <code>pit up 2</code>, <code>pit off</code>, <code>miso 25 mcg PV q4h</code>, <code>cervidil</code>, <code>foley bulb</code>, <code>AROM</code>, <code>mag 4 g IV load then 2 g/h</code>, <code>labetalol 20 mg IV</code>, <code>PCN G 5 MU IV then 2.5 MU q4h</code>, <code>terbutaline 0.25 mg SQ</code>, <code>epidural</code>, <code>c-section stat for prolonged decel</code>, <code>TXA 1 g IV</code>.</p>
+      <p><b>Wrong orders</b> get nurse pushback, a pharmacy callback — or they quietly go through and hurt someone, depending on who's on.</p>
+      <p><b>Nurses are people.</b> Each has a persistent bias and noise on exams, her own Pit style, and her own threshold for calling you. Two exams 20 minutes apart can disagree. Examine her yourself when it matters (it takes time).</p>
+      <p><b>Read the strip yourself.</b> The game never labels the category. US paper: FHR 30–240, 3 cm/min. Blue dashed = maternal pulse (watch for pickup). With <code>IUPC</code> the bottom channel is true mmHg.</p>
+      <p><b>One OR, one anesthesiologist.</b> A crash section bumps your scheduled repeat and makes the epidurals wait. You can <code>call backup</code> (30 min).</p>
+      <p><b>Scoring</b> is on outcomes (cord gas, NICU, hemorrhage, eclampsia…), with the NTSV cesarean rate tracked so sectioning everyone doesn't win. The debrief reveals the hidden truth next to what you were told.</p>
+      <p><b>Keys</b>: <code>space</code> pause · <code>1</code>–<code>4</code> speed · <code>N</code> next page · <code>/</code> order box · <code>E</code> examine · <code>[</code> <code>]</code> prev/next patient.</p>
+    </div>
+  </div>`;
+  ov.classList.add('show');
+  let mode = 'night';
+  ov.querySelectorAll('.mode').forEach(el => el.onclick = () => { ov.querySelectorAll('.mode').forEach(x => x.classList.remove('on')); el.classList.add('on'); mode = el.dataset.mode; });
+  $('#rndSeed').onclick = () => { $('#seedIn').value = randomSeed(); };
+  $('#startBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode, seed: $('#seedIn').value.trim() || randomSeed(), teaching: $('#teachIn').checked }); };
+  if ($('#resumeBtn')) $('#resumeBtn').onclick = () => ov.classList.remove('show');
+  if ($('#replayBtn')) $('#replayBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode: last.mode, seed: last.seed, replay: last.log }); };
+  if ($('#exportBtn')) $('#exportBtn').onclick = exportNight;
+  $('#importIn').onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    f.text().then(txt => { try { const j = JSON.parse(txt); ov.classList.remove('show'); newGame({ mode: j.mode, seed: j.seed, replay: j.log }); } catch { alert('Not a replay file.'); } });
+  };
+  if (first) setSpeed(0);
+}
+function randomSeed() {
+  const w = ['full-moon', 'nightshift', 'triage', 'pitocin', 'magnesium', 'stat', 'labor', 'crowning', 'nuchal', 'bishop', 'zhang', 'apgar'];
+  return w[Math.floor(Math.random() * w.length)] + '-' + Math.floor(Math.random() * 9000 + 1000);
+}
+function exportNight() {
+  const s = ui.sim;
+  const blob = new Blob([JSON.stringify({ seed: s.seed, mode: s.mode, log: s.cmdLog, endedAt: s.t }, null, 1)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `ld-night-${s.seed}.json`; a.click();
+}
+
+function newGame({ mode, seed, teaching = false, replay = null }) {
+  document.querySelectorAll('.labpanel').forEach(x => x.remove());
+  ui.sim = new Sim({ seed, mode, teaching });
+  ui.replay = !!replay;
+  if (replay) ui.sim.loadReplay(replay);
+  ui.view.teaching = teaching; $('#teach').checked = teaching;
+  ui.selId = null; ui.msgNodes.clear(); $('#feed').innerHTML = ''; ui.acted.clear();
+  ui.ended = false; ui.lastUrgentSeen = -1; ui.view.live = true;
+  ui.sim.on((type, m) => {
+    if (type === 'msg') onMsg(m);
+    if (type === 'ended') endShift();
+  });
+  const first = ui.sim.patients.find(p => p.area === 'ldr') || ui.sim.patients[0];
+  if (first) select(first.id);
+  setSpeed(mode === 'lab' ? 1 : 0);
+  renderAll();
+  if (mode === 'lab') renderLab();
+}
+
+function endShift() {
+  if (ui.ended) return;
+  ui.ended = true; setSpeed(0);
+  const s = ui.sim;
+  if (!ui.replay) { const h = loadHistory(); h.push({ seed: s.seed, mode: s.mode, log: s.cmdLog, t: Date.now() }); saveHistory(h); }
+  showDebrief(s, $('#overlay'), { onMenu: () => showMenu(), onReplay: () => newGame({ mode: s.mode, seed: s.seed, replay: s.cmdLog }), onSame: () => newGame({ mode: s.mode, seed: s.seed }) });
+}
+
+// ------------------------------------------------------------------------ loop
+function setSpeed(sp) {
+  ui.speed = sp;
+  if (sp === 'skip') ui.skipFromMsg = ui.sim ? ui.sim.nextMsgId : 0;
+  document.querySelectorAll('#speed button').forEach(b => b.classList.toggle('on', String(b.dataset.speed) === String(sp)));
+}
+let lastFrame = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - lastFrame) / 1000);
+  lastFrame = now;
+  const s = ui.sim;
+  if (s && !ui.ended && ui.speed) {
+    let n;
+    if (ui.speed === 'skip') n = 900; // ~54,000x; stops on the next page
+    else { ui.carry += dt * ui.speed; n = Math.floor(ui.carry); ui.carry -= n; }
+    n = Math.min(n, 1500);
+    for (let i = 0; i < n && !s.ended; i++) {
+      s.applyReplay();
+      s.tick();
+      if (ui.speed === 'skip' && s.msgs.length && s.msgs[s.msgs.length - 1].id >= ui.skipFromMsg && s.msgs[s.msgs.length - 1].prio >= 1) { setSpeed(0); break; }
+      if (s.lastUrgentT === s.t && $('#autoslow').checked && (ui.speed === 'skip' || ui.speed > 1)) { setSpeed(1); break; }
+    }
+  }
+  if (s) {
+    const p = s.byId[ui.selId];
+    if (p) drawStrip($('#strip'), s, p, ui.view);
+    if (now - ui.lastRender > 250) { ui.lastRender = now; renderAll(); }
+  }
+  requestAnimationFrame(frame);
+}
+
+// ------------------------------------------------------------------------ messages
+function onMsg(m) {
+  const node = msgNode(m);
+  $('#feed').prepend(node);
+  ui.msgNodes.set(m.id, node);
+  applyFilter(node, m);
+  if (m.pid && m.pid === ui.selId) m.read = true;
+  if (m.prio >= 3) {
+    banner(m);
+    beep(2);
+  } else if (m.prio === 2) beep(1);
+}
+function msgNode(m) {
+  const d = document.createElement('div');
+  d.className = `msg p${m.prio} role-${m.role}${m.read ? '' : ' unread'}`;
+  const s = ui.sim;
+  d.innerHTML = `<div class="mh"><span class="from">${esc(m.from)}</span>${m.room ? `<span class="rm" data-pid="${m.pid}">${esc(m.room)}</span>` : ''}<span class="time">${s.clock(m.t)}</span></div>
+    <div class="mt">${esc(m.text)}</div>
+    ${m.actions && m.actions.length ? `<div class="ma">${m.actions.map((a, i) => `<button data-i="${i}">${esc(a.label)}</button>`).join('')}</div>` : ''}`;
+  d.querySelectorAll('.ma button').forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    const a = m.actions[+b.dataset.i];
+    if (ui.replay) return;
+    if (a.cmd.type === 'mdExam') { const r = ui.sim.command(a.cmd); feedback(r); }
+    else { const r = ui.sim.command(a.cmd); if (a.cmd2) ui.sim.command(a.cmd2); if (a.cmd.type === 'order') feedback(r); }
+    b.disabled = true;
+    if (['confirm', 'cancel', 'choice'].includes(a.cmd.type)) d.querySelectorAll('.ma button').forEach(x => x.disabled = true);
+  });
+  const rm = d.querySelector('.rm');
+  if (rm) rm.onclick = (e) => { e.stopPropagation(); select(m.pid); };
+  d.onclick = () => { m.read = true; d.classList.remove('unread'); if (m.pid) select(m.pid); };
+  return d;
+}
+function applyFilter(node, m) {
+  const f = ui.filter;
+  const show = f === 'all' || (f === 'urgent' && m.prio >= 2) || (f === 'pt' && m.pid === ui.selId);
+  node.classList.toggle('hidden', !show);
+}
+function refreshFeed() {
+  const s = ui.sim;
+  for (let i = s.msgs.length - 1, k = 0; i >= 0 && k < 250; i--, k++) {
+    const m = s.msgs[i], node = ui.msgNodes.get(m.id);
+    if (!node) continue;
+    if (m.resolved) node.classList.add('resolved');
+    if (m.read) node.classList.remove('unread');
+    applyFilter(node, m);
+  }
+}
+let bannerTimer = null;
+function banner(m) {
+  const b = $('#banner');
+  b.textContent = `${m.room ? m.room + ' — ' : ''}${m.text}`;
+  b.classList.remove('hidden');
+  b.onclick = () => { if (m.pid) select(m.pid); b.classList.add('hidden'); };
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => b.classList.add('hidden'), 8000);
+}
+function beep(level) {
+  if (!$('#sound').checked) return;
+  try {
+    ui.audio = ui.audio || new (window.AudioContext || window.webkitAudioContext)();
+    const ac = ui.audio, t = ac.currentTime;
+    const tones = level >= 2 ? [880, 660, 880] : [660];
+    tones.forEach((f, i) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = f; o.type = 'sine';
+      g.gain.setValueAtTime(0.0001, t + i * 0.18); g.gain.exponentialRampToValueAtTime(0.15, t + i * 0.18 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.18 + 0.16);
+      o.connect(g).connect(ac.destination); o.start(t + i * 0.18); o.stop(t + i * 0.18 + 0.17);
+    });
+  } catch { /* no audio */ }
+}
+
+// ------------------------------------------------------------------------ selection & rendering
+function select(pid) {
+  ui.selId = pid;
+  const s = ui.sim;
+  for (const m of s.msgs) if (m.pid === pid) m.read = true;
+  ui.view.live = true;
+  renderAll();
+}
+
+function renderAll() {
+  const s = ui.sim; if (!s) return;
+  renderTop(); renderBoard(); renderPatient(); refreshFeed();
+}
+
+function renderTop() {
+  const s = ui.sim;
+  $('#clock').textContent = s.clock();
+  const occ = s.rooms.filter(r => r.pid).length;
+  const cleaning = s.rooms.filter(r => !r.pid && r.cleanUntil > s.t).length;
+  const tri = s.bays.filter(b => b.pid).length;
+  const wait = s.waiting.filter(id => { const p = s.byId[id]; return p && p.area === 'waiting'; }).length;
+  const or = s.ors.map(o => o.pid ? `<span class="busy">${o.name}: ${esc(s.byId[o.pid].name.split(' ')[0])} (${o.phase})</span>` : o.cleanUntil > s.t ? `<span>${o.name}: cleaning</span>` : `<span>${o.name}: <b>free</b></span>`).join(' ');
+  const an = s.anes.map(a => a.task ? `<span class="busy">${a.short}: ${a.task.kind === 'cs' ? 'in OR' : 'epidural ' + esc(s.byId[a.task.pid]?.room || '')}</span>` : `<span>${a.short}: <b>free</b></span>`).join(' ');
+  const q = s.anesQueue.length ? ` <span class="busy">(${s.anesQueue.length} epidural${s.anesQueue.length > 1 ? 's' : ''} waiting)</span>` : '';
+  const nt = ntsvNow(s);
+  const ntTxt = nt.tot ? `${nt.cs}/${nt.tot} (${Math.round(nt.rate * 100)}%)` : '—';
+  $('#floorstats').innerHTML = `<span>LDR <b>${occ}/8</b>${cleaning ? ` (${cleaning} cleaning)` : ''}</span><span>Triage <b>${tri}/3</b>${wait ? ` <span class="bad">+${wait} waiting</span>` : ''}</span>${or}<span>${an}${q}</span><span>NTSV CS <b class="${nt.rate > 0.236 && nt.tot >= 3 ? 'bad' : ''}">${ntTxt}</b></span>${ui.replay ? '<span class="busy">▶ REPLAY</span>' : ''}${s.mode === 'lab' ? '' : `<span>ends ${s.clock(s.endT)}</span>`}`;
+}
+
+function knownStatus(p, s) {
+  const bits = [];
+  if (p.outcome) {
+    const o = p.outcome;
+    bits.push(`Delivered ${s.clock(o.t)} ${o.mode === 'cs' ? 'CS' : o.mode === 'home' ? '(home!)' : o.vacuum ? 'VAVD' : 'SVD'}`);
+    if (p.T.pp) { const last = [...p.chart.vitals].reverse().find(v => v.qbl != null); if (last) bits.push(`QBL ${last.qbl}`); }
+    return bits.join(' · ');
+  }
+  if (p.area === 'or') return `In ${p.room} — ${p.csRequest ? p.csRequest.urgency : ''} section`;
+  if (p.area === 'preop') return `Pre-op · ${p.csRequest ? 'CS at ' + s.clock(p.csRequest.notBefore || p.csRequest.reqT) : ''}`;
+  if (p.area === 'triage' || p.area === 'waiting') {
+    bits.push(s.complaintText(p));
+  }
+  if (p.pushing === 'pushing') bits.push(`Pushing ${fmtDur(s.t - p.pushStartT)}`);
+  else if (p.pushing === 'labor_down') bits.push('Laboring down');
+  const sv = p.chart.sves[p.chart.sves.length - 1];
+  if (sv && p.pushing !== 'pushing') bits.push(`${sveString(sv)} @${s.clock(sv.t)}`);
+  if (p.meds.pit.rate) bits.push(`Pit ${p.meds.pit.rate}${p.meds.pit.protocol ? 'ᵖ' : ''}`);
+  if (p.meds.mag.on) bits.push(`Mg ${p.meds.mag.rate}`);
+  if (p.meds.cervidil.in) bits.push('Cervidil');
+  if (p.meds.foley.in) bits.push('Foley');
+  if (p.epidural.state !== 'none') bits.push(p.epidural.state === 'working' ? 'epidural' : 'epi: ' + p.epidural.state.replace('_', ' '));
+  if (p.csRequest && p.csRequest.phase === 'waiting') bits.push(`<b style="color:var(--red)">CS ${p.csRequest.urgency} pending</b>`);
+  return bits.join(' · ');
+}
+function tags(p) {
+  const t = [];
+  const k = p.known;
+  if (k.preE === 'severe') t.push(['PreE SF', 'red']); else if (k.preE === 'mild' || p.chart.problems.includes('preE')) t.push(['PreE', 'amber']);
+  if (p.dx.gHTN && k.preE === 'none') t.push(['gHTN', 'amber']);
+  if (p.dx.cHTN) t.push(['cHTN', 'amber']);
+  if (p.priorCS) t.push([p.kind === 'cs_sched' ? 'prior CS' : 'TOLAC', 'amber']);
+  if (p.gbs === 'pos') t.push(['GBS+', 'violet']); else if (p.gbs === 'unknown') t.push(['GBS ?', 'violet']);
+  if (p.allergy.pcn !== 'none') t.push([`PCN ${p.allergy.pcn === 'anaphylaxis' ? 'anaph' : 'rash'}`, 'red']);
+  if (p.dx.gdm) t.push(['GDM', 'blue']);
+  if (p.dx.iugr) t.push(['FGR', 'blue']);
+  if (p.asthma) t.push(['asthma', 'blue']);
+  if (k.breech || k.breechSuspected) t.push([k.breech ? 'BREECH' : 'breech?', 'red']);
+  if (k.previa) t.push(['PREVIA', 'red']);
+  if (p.dx.twins) t.push(['twins', 'blue']);
+  if (p.gaDays < 259) t.push([fmtGA(p.gaDays), 'amber']);
+  if (p.chart.romKnown && !p.outcome) t.push(['ROM', 'green']);
+  if (p.T.fluid === 'mec' && p.chart.romKnown) t.push(['MSF', 'amber']);
+  return t.map(([x, c]) => `<span class="tag ${c}">${esc(x)}</span>`).join('');
+}
+function truthLine(p) {
+  const T = p.T;
+  if (!ui.view.teaching) return '';
+  const pH = 7.31 - 0.019 * (T.bd - 3) - 0.11 * T.resp;
+  return `<div class="truth">truth: ${T.dil.toFixed(1)} cm, sta ${T.station.toFixed(1)}, R ${T.R.toFixed(2)} · BD ${T.bd.toFixed(1)} pH≈${pH.toFixed(2)} · plac ${T.plac.toFixed(2)}${T.prolapse ? ' · PROLAPSE' : ''}${T.abr ? ' · abruption ' + T.abr.toFixed(2) : ''}${T.infect > 1 ? ' · Triple I' : ''}${T.demise ? ' · DEMISE' : ''}</div>`;
+}
+function unreadCount(pid) { let n = 0, hi = 0; for (const m of ui.sim.msgs) if (m.pid === pid && !m.read && m.prio >= 1) { n++; hi = Math.max(hi, m.prio); } return [n, hi]; }
+
+function card(p, s, label) {
+  const [n, hi] = unreadCount(p.id);
+  const nurse = s.nurseOf(p);
+  const ga = fmtGA(p.gaDays);
+  return `<div class="card${p.id === ui.selId ? ' sel' : ''}" data-pid="${p.id}">
+    <div class="r1"><span class="room">${esc(label || p.room || '')}${n ? ` <span class="badge${hi < 2 ? ' lo' : ''}">${n}</span>` : ''}</span><span class="meta">${nurse ? esc(nurse.name) : ''}</span></div>
+    <div><span class="nm">${esc(p.name.split(' ')[0])}</span> <span class="meta">${p.age} G${p.gravida}P${p.para} ${ga}</span></div>
+    <div class="st">${knownStatus(p, s)}</div>
+    <div class="tags">${tags(p)}</div>
+    ${truthLine(p)}
+    ${p.mon.on && p.mon.t0 !== null && !p.outcome ? `<canvas data-mini="${p.id}"></canvas>` : ''}
+  </div>`;
+}
+
+function renderBoard() {
+  const s = ui.sim;
+  let h = '<div class="bsec"><h3><span>Labor &amp; delivery</span></h3>';
+  for (const r of s.rooms) {
+    const p = r.pid ? s.byId[r.pid] : null;
+    h += p ? card(p, s, r.name) : `<div class="card empty">${r.name} — ${r.cleanUntil > s.t ? 'being cleaned (' + Math.ceil((r.cleanUntil - s.t) / 60) + ' min)' : 'open'}</div>`;
+  }
+  h += '</div><div class="bsec"><h3><span>Triage</span></h3>';
+  for (const b of s.bays) {
+    const p = b.pid ? s.byId[b.pid] : null;
+    h += p ? card(p, s, b.name + (p.boarding ? ' (boarding)' : '')) : `<div class="card empty">${b.name} — open</div>`;
+  }
+  const waiting = s.patients.filter(p => p.area === 'waiting' && p.status !== 'gone');
+  if (waiting.length) { h += '<h3><span>Waiting room</span></h3>'; for (const p of waiting) h += card(p, s, p.waitingForBay ? 'Waiting (triage full)' : 'Waiting (scheduled)'); }
+  h += '</div>';
+  const elsewhere = s.patients.filter(p => ['or', 'pacu', 'preop'].includes(p.area) && p.status !== 'gone');
+  if (elsewhere.length) { h += '<div class="bsec"><h3><span>Pre-op / OR / PACU</span></h3>'; for (const p of elsewhere) h += card(p, s, p.room); h += '</div>'; }
+  const sched = (s.boardSchedule || []).filter(x => x.t > s.t);
+  if (sched.length) h += `<div class="bsec"><h3><span>Coming up</span></h3>${sched.map(x => `<div class="resline"><b>${s.clock(x.t)}</b> ${esc(x.text)}</div>`).join('')}</div>`;
+  const gone = s.patients.filter(p => (p.status === 'gone' && p.outcome) || p.area === 'home');
+  if (gone.length) h += `<div class="bsec"><h3><span>Off the floor</span></h3>${gone.map(p => `<div class="resline" data-pid="${p.id}" style="cursor:pointer">${esc(p.name)} — ${p.outcome ? (p.outcome.mode === 'cs' ? 'CS' : 'SVD') + ' ' + s.clock(p.outcome.t) + (p.outcome.neo.nicu ? ' · NICU' : '') : p.phone ? 'phone: ' + (p.phoneAdvice || 'call') : 'discharged ' + s.clock(p.dischargeT)}</div>`).join('')}</div>`;
+  const board = $('#board');
+  const scroll = board.scrollTop;
+  board.innerHTML = h;
+  board.scrollTop = scroll;
+  board.querySelectorAll('canvas[data-mini]').forEach(c => drawMini(c, s, s.byId[c.dataset.mini]));
+}
+
+function renderPatient() {
+  const s = ui.sim, p = s.byId[ui.selId];
+  if (!p) { $('#ptHeader').innerHTML = '<span class="sub">Select a patient on the board.</span>'; return; }
+  const nurse = s.nurseOf(p);
+  $('#ptHeader').innerHTML = `<span class="big">${esc(p.name)}</span><span class="sub">${p.age}yo G${p.gravida}P${p.para} · ${fmtGA(p.gaDays)} wk · BMI ${p.bmi} · ${esc(p.room || p.area)}</span>
+    <span class="sub">${esc(p.indication)}</span>${nurse ? `<span class="sub">RN <b>${esc(nurse.name)}</b> <span class="tag">${esc(nurse.label)}</span></span>` : ''}${p.labMode ? '<span class="tag green">lab</span>' : ''}`;
+  // strip info
+  const m = p.mon;
+  $('#stripInfo').textContent = `${p.devices.fse ? 'FSE' : 'US'} / ${p.devices.iupc ? 'IUPC' : 'TOCO'}${m.on ? '' : ' · OFF MONITOR'}${ui.view.live ? '' : ' · viewing ' + s.clock(ui.view.endT)}`;
+  $('#liveBtn').classList.toggle('live', ui.view.live);
+  // vitals bar
+  const v = s.lastVitals(p);
+  const vb = [];
+  if (v) {
+    const hot = v.sbp >= 160 || v.dbp >= 110;
+    vb.push(`<span class="${hot ? 'hot' : ''}">BP <b>${v.sbp}/${v.dbp}</b></span>`, `HR <b>${v.hr}</b>`, `<span class="${v.temp >= 38 ? 'hot' : ''}">T <b>${v.temp}</b></span>`, `RR <b>${v.rr}</b>`, `SpO₂ <b>${v.spo2}</b>`);
+    if (v.reflex) vb.push(`<span class="${v.reflex === 'absent' ? 'hot' : ''}">DTR <b>${v.reflex}</b></span>`);
+    vb.push(`<span>@${s.clock(v.t)} (${esc(v.by)})</span>`);
+  }
+  const pit = p.meds.pit;
+  if (pit.rate || pit.protocol) vb.push(`Pit <b>${pit.rate}</b> mU/min${pit.protocol ? ` (protocol ↑${pit.protocol.inc} q${pit.protocol.intervalMin}′, max ${pit.protocol.max})` : ''}`);
+  if (p.meds.mag.on) vb.push(`Mg <b>${p.meds.mag.rate}</b> g/h`);
+  if (p.meds.o2) vb.push('O₂');
+  if (p.devices.amnioinf) vb.push('amnioinfusion');
+  if (p.chart.romKnown && p.T.romT > -1e8 && !p.outcome) vb.push(`ROM ${fmtDur(s.t - p.T.romT)}`);
+  if (p.T.pp) { const q = [...p.chart.vitals].reverse().find(x => x.qbl != null); if (q) vb.push(`QBL <b>${q.qbl}</b> · fundus ${esc(q.fundus)}`); }
+  $('#vitalsBar').innerHTML = vb.join('') || '<span>No vitals yet.</span>';
+  renderQuick(p);
+  renderTabs();
+  renderChart(p);
+}
+
+function quickDefs(p) {
+  const O = (label, text, cls) => ({ label, text, cls });
+  if (p.outcome) return [O('Fundal massage', 'fundal massage'), O('TXA 1 g', 'TXA 1 g IV'), O('Methergine 0.2', 'methergine 0.2 mg IM'), O('Hemabate 250', 'hemabate 250 mcg IM'), O('Miso 800 PR', 'miso 800 mcg PR'), O('Pit 40 u/1 L', 'pit 40 units in 1 L'), '|', O('Bakri', 'bakri'), O('Transfuse 2u', 'transfuse 2 units'), O('Return to OR', 'return to OR', 'cs'), '|', O('CBC', 'CBC'), O('Fibrinogen', 'fibrinogen'), O('Vitals', 'vitals')];
+  if (p.area === 'triage' || p.area === 'waiting') return [O('Admit', 'admit'), O('Discharge', 'discharge'), O('Walk 2 h', 'observe'), '|', O('SVE (RN)', 'SVE'), { label: 'Examine (you)', md: true }, O('ROM test', 'ROM test'), O('Bedside US', 'bedside US'), O('PIH labs', 'PIH labs'), O('UPC', 'UPC'), O('Vitals', 'vitals'), O('VAS', 'VAS'), '|', { label: 'C-section…', cs: true }];
+  return [
+    O('SVE (RN)', 'SVE'), { label: 'Examine (you)', md: true }, O('Vitals', 'vitals'), O('Reposition', 'reposition'), O('LR 500', 'LR bolus 500'), O('O₂', 'O2'), '|',
+    O('Pit protocol', 'pit per protocol'), O('Pit ↑2', 'pit up 2'), O('Pit ↓2', 'pit down 2'), O('Pit off', 'pit off'), '|',
+    O('AROM', 'AROM'), O('IUPC', 'IUPC'), O('FSE', 'FSE'), O('Amnioinfusion', 'amnioinfusion'), O('Terb', 'terbutaline 0.25 mg SQ'), O('VAS', 'VAS'), '|',
+    O('Epidural', 'epidural'), O('Bedside US', 'bedside US'), O('CBC', 'CBC'), O('PIH labs', 'PIH labs'), '|',
+    O('Push', 'push'), O('Labor down', 'labor down'), O('Vacuum', 'vacuum'), { label: 'C-section…', cs: true },
+  ];
+}
+let quickFor = null;
+function renderQuick(p) {
+  const key = p.id + (p.outcome ? 'pp' : p.area);
+  if (quickFor === key) return;
+  quickFor = key;
+  const q = $('#quick');
+  q.innerHTML = '';
+  for (const d of quickDefs(p)) {
+    if (d === '|') { const sp = document.createElement('span'); sp.className = 'sep'; q.appendChild(sp); continue; }
+    const b = document.createElement('button');
+    b.textContent = d.label;
+    if (d.cls || d.cs) b.className = 'cs';
+    b.onclick = () => {
+      if (ui.replay) return;
+      if (d.md) feedback(ui.sim.command({ type: 'mdExam', pid: ui.selId }));
+      else if (d.cs) csDialog();
+      else submitOrder(d.text);
+    };
+    q.appendChild(b);
+  }
+}
+
+function csDialog() {
+  const ov = $('#overlay');
+  const p = ui.sim.byId[ui.selId];
+  ov.innerHTML = `<div class="dlg narrow cs-dlg"><h2>Cesarean — ${esc(p.name)}</h2>
+    <div class="row"><label><input type="radio" name="urg" value="stat"> <b>STAT</b> (category 1 — now, GA if no epidural)</label></div>
+    <div class="row"><label><input type="radio" name="urg" value="urgent" checked> <b>Urgent</b> (category 2 — next available)</label></div>
+    <div class="row"><label><input type="radio" name="urg" value="routine"> <b>Scheduled / non-urgent</b></label></div>
+    <div class="row" style="display:block"><label>Indication<br><select id="csInd">${CS_INDICATIONS.map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select></label></div>
+    <div class="btnrow"><button id="csGo" class="danger">Call the section</button><button id="csCancel" class="ghost">Cancel</button></div></div>`;
+  ov.classList.add('show');
+  $('#csCancel').onclick = () => ov.classList.remove('show');
+  $('#csGo').onclick = () => {
+    const urg = ov.querySelector('input[name=urg]:checked').value;
+    const ind = CS_INDICATIONS.find(x => x[0] === $('#csInd').value)[1];
+    ov.classList.remove('show');
+    submitOrder(`c-section ${urg === 'routine' ? 'scheduled' : urg} for ${ind}`);
+  };
+}
+
+const TABS = [['overview', 'Overview'], ['exams', 'Exams'], ['vitals', 'Vitals'], ['labs', 'Labs'], ['orders', 'Orders'], ['mar', 'MAR'], ['truth', 'Truth']];
+function renderTabs() {
+  const el = $('#chartTabs');
+  const want = TABS.filter(([k]) => k !== 'truth' || ui.view.teaching);
+  const sig = want.map(x => x[0]).join() + ui.tab;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  el.innerHTML = want.map(([k, l]) => `<button data-tab="${k}" class="${ui.tab === k ? 'on' : ''}">${l}</button>`).join('');
+  el.querySelectorAll('button').forEach(b => b.onclick = () => { ui.tab = b.dataset.tab; renderPatient(); });
+}
+
+function renderChart(p) {
+  const s = ui.sim, el = $('#chart');
+  let h = '';
+  if (ui.tab === 'overview') {
+    const k = p.known;
+    const sched = (p.meds.sched || []).filter(x => !x.lostShown).map(x => `${x.drug} ${x.amt}${x.route ? ' ' + x.route : ''} q${x.everyH}h — next ${s.clock(x.nextT)}`);
+    const abx = p.meds.abx.slice(-4).map(a => `${a.drug} @${s.clock(a.t)}`);
+    h = `<div class="cols"><div class="kv">
+      <span class="k">Indication</span><span>${esc(p.indication)}</span>
+      <span class="k">Plan (sign-out)</span><span>${esc(p.plan || '—')}</span>
+      <span class="k">G/P</span><span>G${p.gravida}P${p.para}${p.priorCS ? ` · prior CS ×${p.priorCS}` : ''}${p.priorVag ? ` · ${p.priorVag} prior vaginal` : ''}</span>
+      <span class="k">GA</span><span>${fmtGA(p.gaDays)} weeks</span>
+      <span class="k">BMI / weight</span><span>${p.bmi} / ${p.weightKg} kg</span>
+      <span class="k">Allergies</span><span>${p.allergy.list.length ? esc(p.allergy.list.join(', ')) : 'NKDA'}</span>
+      <span class="k">GBS</span><span>${p.gbs}${p.gbs === 'pos' && p.known.clindaResult ? ' (clinda ' + p.known.clindaResult + ')' : ''}</span>
+      <span class="k">History</span><span>${esc(k.notes.join('; ') || '—')}</span>
+      <span class="k">Membranes</span><span>${p.chart.romKnown ? 'ruptured' + (p.T.romT > -1e8 ? ' ' + fmtDur(s.t - p.T.romT) + ' ago' : '') : p.chart.romResult === 'negative' ? 'intact (ROM test neg)' : 'intact (as far as we know)'}</span>
+    </div><div class="kv">
+      <span class="k">Status</span><span>${knownStatus(p, s) || '—'}</span>
+      <span class="k">Epidural</span><span>${p.epidural.state}${p.flags.natural ? ' (wants natural birth)' : ''}</span>
+      <span class="k">Devices</span><span>${[p.devices.iupc && 'IUPC', p.devices.fse && 'FSE', p.devices.amnioinf && 'amnioinfusion', p.meds.foley.in && 'cervical Foley', p.meds.cervidil.in && `Cervidil (in ${fmtDur(s.t - p.meds.cervidil.inT)})`].filter(Boolean).join(', ') || '—'}</span>
+      <span class="k">Scheduled meds</span><span>${esc(sched.join('; ') || '—')}</span>
+      <span class="k">Recent abx</span><span>${esc(abx.join(', ') || '—')}</span>
+      <span class="k">Admitted</span><span>${p.admitT != null ? s.clock(p.admitT) : '—'}${p.flags.iolStartT != null ? ` · IOL started ${s.clock(p.flags.iolStartT)}` : ''}</span>
+      ${p.outcome ? `<span class="k">Delivery</span><span>${s.clock(p.outcome.t)} ${p.outcome.mode}${p.outcome.vacuum ? ' (vacuum)' : ''} · ${p.outcome.neo.liveborn ? `${p.outcome.neo.sex} ${p.outcome.neo.weight} g, Apgars ${p.outcome.neo.apgar1}/${p.outcome.neo.apgar5}` : 'stillborn'}</span>` : ''}
+    </div></div>`;
+  } else if (ui.tab === 'exams') {
+    const rows = p.chart.sves.slice().reverse().map((x, i, arr) => {
+      const prev = arr[i + 1];
+      const dt = prev ? fmtDur(x.t - prev.t) : '';
+      return `<tr><td class="mono">${s.clock(x.t)}</td><td class="mono"><b>${sveString(x)}</b></td><td>${esc(x.by)}</td><td class="mono">${dt}</td><td>${esc((x.notes || []).join(', '))}</td>${ui.view.teaching && x.trueDil != null ? `<td class="truth">true ${x.trueDil.toFixed(1)} / ${x.trueSta.toFixed(1)}</td>` : ''}</tr>`;
+    }).join('');
+    h = `<table><tr><th>Time</th><th>Exam</th><th>By</th><th>Interval</th><th>Notes</th>${ui.view.teaching ? '<th>Truth</th>' : ''}</tr>${rows || '<tr><td colspan=5>No exams yet.</td></tr>'}</table>`;
+  } else if (ui.tab === 'vitals') {
+    const rows = p.chart.vitals.slice(-30).reverse().map(v => v.qbl != null
+      ? `<tr><td class="mono">${s.clock(v.t)}</td><td colspan=6>QBL <b>${v.qbl}</b> mL · fundus ${esc(v.fundus)}</td><td>${esc(v.by)}</td></tr>`
+      : `<tr><td class="mono">${s.clock(v.t)}</td><td class="mono" style="${v.sbp >= 160 || v.dbp >= 110 ? 'color:var(--red)' : ''}">${v.sbp}/${v.dbp}</td><td class="mono">${v.hr}</td><td class="mono" style="${v.temp >= 38 ? 'color:var(--red)' : ''}">${v.temp}</td><td class="mono">${v.rr}</td><td class="mono">${v.spo2}</td><td>${v.reflex || ''}</td><td>${esc(v.by)}</td></tr>`).join('');
+    h = `<table><tr><th>Time</th><th>BP</th><th>HR</th><th>T</th><th>RR</th><th>SpO₂</th><th>DTR</th><th>By</th></tr>${rows}</table>`;
+  } else if (ui.tab === 'labs') {
+    const rows = p.chart.labs.slice().reverse().map(l => `<tr><td class="mono">${s.clock(l.orderT)}</td><td>${esc(l.label)}</td><td class="mono">${l.values ? esc(l.text) : `pending (≈${s.clock(l.resultT)})`}</td></tr>`).join('');
+    h = `<table><tr><th>Ordered</th><th>Test</th><th>Result</th></tr>${rows || '<tr><td colspan=3>No labs.</td></tr>'}</table>`;
+  } else if (ui.tab === 'orders') {
+    const rows = p.chart.orders.slice().reverse().map(o => `<tr><td class="mono">${s.clock(o.t)}</td><td>${esc(o.label)}<div class="mono" style="color:var(--dim);font-size:11px">${esc(o.text)}</div></td><td class="st-${o.status}">${o.status.replace('_', ' ')}${o.overridden ? ' (override)' : ''}</td><td>${o.status.startsWith('held') || o.status === 'new' ? `<button class="small" data-cancel="${o.id}">cancel</button>` : ''}</td></tr>`).join('');
+    h = `<table><tr><th>Time</th><th>Order</th><th>Status</th><th></th></tr>${rows || '<tr><td colspan=4>No orders yet.</td></tr>'}</table>`;
+  } else if (ui.tab === 'mar') {
+    const rows = p.chart.mar.slice().reverse().map(x => `<tr><td class="mono">${s.clock(x.t)}</td><td>${esc(x.text)}</td><td>${esc(x.by)}</td></tr>`).join('');
+    h = `<table><tr><th>Time</th><th>Given</th><th>By</th></tr>${rows || '<tr><td colspan=3>Nothing given yet.</td></tr>'}</table>`;
+  } else if (ui.tab === 'truth') {
+    const T = p.T, n = s.nurseOf(p);
+    const pH = 7.31 - 0.019 * (T.bd - 3) - 0.11 * T.resp;
+    h = `<div class="truthbox"><h4>Hidden truth (teaching mode)</h4><div class="cols"><div class="kv">
+      <span class="k">Dilation / station</span><span>${T.dil.toFixed(2)} cm / ${T.station.toFixed(2)} ${T.op ? '(OP)' : ''}</span>
+      <span class="k">Ripeness R</span><span>${T.R.toFixed(2)}</span>
+      <span class="k">Labor</span><span>${p.truePhase || '—'} · drive S ${T.S.toFixed(2)} · rate ${(T.dilRate || 0).toFixed(2)} cm/h</span>
+      <span class="k">Contractions</span><span>f10 ${T.f10drive?.toFixed(1)} · MVU ${Math.round(T.mvu)} · tone ${T.tone?.toFixed(0)}</span>
+      <span class="k">Pit sensitivity</span><span>EC50 ${T.ec50.toFixed(1)} mU/min · effect-site ${T.pitCe.toFixed(1)}</span>
+      <span class="k">CPD / arrest</span><span>${T.cpdCm != null ? 'arrests at ' + T.cpdCm.toFixed(1) + ' cm' : T.cpdSta != null ? 'descent stops at ' + T.cpdSta.toFixed(1) : 'none'}</span>
+      <span class="k">Infection</span><span>${T.infect.toFixed(2)} ${T.infect > 1 ? '(Triple I)' : ''}</span>
+    </div><div class="kv">
+      <span class="k">Placental reserve</span><span>${T.plac.toFixed(2)}</span>
+      <span class="k">Oxygenation</span><span>${T.ox.toFixed(2)}</span>
+      <span class="k">Base deficit</span><span>${T.bd.toFixed(1)} → pH ≈ ${pH.toFixed(2)}</span>
+      <span class="k">Cord</span><span>vuln ${T.cordVuln.toFixed(3)} × pos ${T.cordPos.toFixed(2)}${T.nuchal ? ' · nuchal' : ''}${T.prolapse ? ' · PROLAPSE' : ''}</span>
+      <span class="k">EFW (true)</span><span>${T.efw} g</span>
+      <span class="k">Mother</span><span>BP ${T.sbp.toFixed(0)}/${T.dbp.toFixed(0)} · Mg ${T.mg.toFixed(1)} · plt ${T.plt.toFixed(0)} · Cr ${T.cr.toFixed(2)}</span>
+      <span class="k">Nurse</span><span>${n ? `${esc(n.name)}: dil bias ${n.dilBias >= 0 ? '+' : ''}${n.dilBias.toFixed(1)} ±${n.dilNoise.toFixed(1)}, station bias ${n.staBias.toFixed(1)}, knowledge ${n.knowledge.toFixed(2)}, pit ${n.pit}` : '—'}</span>
+    </div></div>
+    <div style="margin-top:8px">${(p.truthLog || []).slice(-12).map(x => `<div class="mono" style="font-size:11px">${s.clock(x.t)} ${esc(x.text)}</div>`).join('')}</div></div>`;
+  }
+  const scroll = el.scrollTop;
+  if (el.dataset.html !== h) { el.innerHTML = h; el.dataset.html = h; el.scrollTop = scroll; }
+}
+
+// ------------------------------------------------------------------------ orders
+function submitOrder(text) {
+  if (!ui.sim || ui.replay) return;
+  if (!ui.selId && !/backup/i.test(text)) { feedback({ ok: false, msg: 'Select a patient first.' }); return; }
+  const r = ui.sim.command({ type: 'order', pid: ui.selId, text });
+  feedback(r);
+  ui.tab === 'orders' && renderPatient();
+}
+function feedback(r) {
+  const el = $('#orderPreview');
+  if (!r) return;
+  el.textContent = r.ok ? '✓ ' + (r.msg || 'sent') : '✗ ' + (r.msg || 'not sent');
+  el.classList.toggle('err', !r.ok);
+}
+
+function wire() {
+  // the board and chart re-render several times a second: delegate on mousedown so clicks never land on a stale node
+  $('#board').addEventListener('mousedown', (e) => { const el = e.target.closest('[data-pid]'); if (el) select(el.dataset.pid); });
+  $('#chart').addEventListener('mousedown', (e) => { const b = e.target.closest('[data-cancel]'); if (b && !ui.replay) ui.sim.command({ type: 'cancel', oid: +b.dataset.cancel }); });
+  $('#orderHints').innerHTML = ORDER_HINTS.map(h => `<option value="${esc(h)}">`).join('');
+  const inp = $('#orderInput');
+  inp.addEventListener('input', () => {
+    const v = inp.value.trim();
+    const el = $('#orderPreview');
+    if (!v) { el.textContent = ''; return; }
+    const o = parseOrder(v);
+    el.textContent = o.ok ? '→ ' + describeParsed(o) : o.error;
+    el.classList.toggle('err', !o.ok);
+  });
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); const v = inp.value.trim(); if (v) { submitOrder(v); inp.value = ''; } }
+    if (e.key === 'Escape') inp.blur();
+  });
+  $('#orderGo').onclick = () => { const v = inp.value.trim(); if (v) { submitOrder(v); inp.value = ''; } };
+  document.querySelectorAll('#speed button').forEach(b => b.onclick = () => setSpeed(b.dataset.speed === 'skip' ? 'skip' : +b.dataset.speed));
+  $('#menuBtn').onclick = () => { setSpeed(0); showMenu(); };
+  $('#endBtn').onclick = () => {
+    if (!ui.sim || ui.ended) return;
+    if (!confirm('End the shift now and go to the debrief?')) return;
+    if (ui.replay) { endShift(); return; }
+    ui.sim.command({ type: 'endShift' }); ui.sim.tick();
+  };
+  $('#teach').onchange = (e) => { ui.view.teaching = e.target.checked; if (ui.sim) ui.sim.teaching = e.target.checked; renderAll(); };
+  document.querySelectorAll('.filters button').forEach(b => b.onclick = () => {
+    ui.filter = b.dataset.filter;
+    document.querySelectorAll('.filters button').forEach(x => x.classList.toggle('on', x === b));
+    refreshFeed();
+  });
+  $('#stripWindow').onchange = (e) => { ui.view.window = e.target.value === 'paper' ? 'paper' : +e.target.value; };
+  $('#liveBtn').onclick = () => { ui.view.live = true; };
+  // scrub the strip: drag or wheel
+  const cv = $('#strip');
+  let drag = null;
+  cv.addEventListener('mousedown', (e) => { drag = { x: e.clientX, end: ui.view.live ? ui.sim.t : ui.view.endT }; });
+  window.addEventListener('mouseup', () => { drag = null; });
+  window.addEventListener('mousemove', (e) => {
+    if (!drag || !ui.sim) return;
+    const secPerPx = (ui.view.winSec || 600) / (cv.clientWidth - 40);
+    const end = clamp(drag.end - (e.clientX - drag.x) * secPerPx, 300, ui.sim.t);
+    ui.view.endT = end; ui.view.live = end >= ui.sim.t - 2;
+  });
+  cv.addEventListener('wheel', (e) => {
+    if (!ui.sim) return;
+    e.preventDefault();
+    const base = ui.view.live ? ui.sim.t : ui.view.endT;
+    const end = clamp(base + (e.deltaY + e.deltaX) * (ui.view.winSec || 600) / 1500, 300, ui.sim.t);
+    ui.view.endT = end; ui.view.live = end >= ui.sim.t - 2;
+  }, { passive: false });
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    if ($('#overlay').classList.contains('show')) return;
+    if (e.key === ' ') { e.preventDefault(); setSpeed(ui.speed ? 0 : 1); }
+    else if (e.key === '1') setSpeed(1); else if (e.key === '2') setSpeed(10); else if (e.key === '3') setSpeed(60); else if (e.key === '4') setSpeed(240);
+    else if (e.key === 'n' || e.key === 'N') setSpeed('skip');
+    else if (e.key === '/') { e.preventDefault(); $('#orderInput').focus(); }
+    else if ((e.key === 'e' || e.key === 'E') && ui.selId) feedback(ui.sim.command({ type: 'mdExam', pid: ui.selId }));
+    else if (e.key === '[' || e.key === ']') {
+      const list = [...document.querySelectorAll('#board .card[data-pid]')].map(c => c.dataset.pid);
+      const i = list.indexOf(ui.selId);
+      if (list.length) select(list[(i + (e.key === ']' ? 1 : -1) + list.length) % list.length]);
+    }
+  });
+}
+
+// ------------------------------------------------------------------------ tracing lab
+function renderLab() {
+  const s = ui.sim, p = s.patients[0];
+  const box = document.createElement('div');
+  box.className = 'labpanel';
+  const sl = (key, label, min, max, step, val) => `<label>${label} <span id="lv_${key}">${val}</span><input type="range" data-key="${key}" min="${min}" max="${max}" step="${step}" value="${val}"></label>`;
+  box.innerHTML = sl('plac', 'Placental reserve', 0.3, 1.1, 0.01, p.T.plac.toFixed(2)) + sl('pit', 'Pit mU/min', 0, 30, 1, 0)
+    + sl('cordVuln', 'Cord vulnerability /ctx', 0, 0.8, 0.01, p.T.cordVuln.toFixed(2)) + sl('bd', 'Base deficit (set)', 0, 20, 0.5, p.T.bd.toFixed(1))
+    + sl('epiHypo', 'Epidural hypotension (mmHg)', 0, 50, 1, 0) + sl('temp', 'Maternal temp °C', 36.5, 40, 0.1, p.T.temp0.toFixed(1))
+    + `<label><span>Devices / events</span><span style="display:flex;gap:6px;flex-wrap:wrap"><button data-tog="rom">ROM</button><button data-tog="iupc">IUPC</button><button data-tog="fse">FSE</button><button data-tog="prolapse">Cord prolapse</button></span></label>`;
+  $('#chart').before(box);
+  box.querySelectorAll('input[type=range]').forEach(r => r.oninput = () => {
+    $('#lv_' + r.dataset.key).textContent = r.value;
+    s.command({ type: 'lab', pid: p.id, key: r.dataset.key, value: +r.value });
+  });
+  const state = { rom: false, iupc: false, fse: false, prolapse: false };
+  box.querySelectorAll('[data-tog]').forEach(b => b.onclick = () => {
+    const k = b.dataset.tog;
+    state[k] = !state[k];
+    if ((k === 'iupc' || k === 'fse') && state[k]) { state.rom = true; s.command({ type: 'lab', pid: p.id, key: 'rom', value: 1 }); }
+    s.command({ type: 'lab', pid: p.id, key: k, value: state[k] ? 1 : 0 });
+    box.querySelectorAll('[data-tog]').forEach(x => x.classList.toggle('on', state[x.dataset.tog]));
+  });
+  ui.tab = 'truth'; ui.view.teaching = true; s.teaching = true; $('#teach').checked = true;
+}
+
+wire();
+requestAnimationFrame(frame);
+showMenu(true);
