@@ -3,7 +3,7 @@
 import { Rng } from './rng.js';
 import { ROOMS, TRIAGE_BAYS, LABS } from './data.js';
 import { clamp, fmtClockColon } from './util.js';
-import { stepPatient, sampleHistory, neonatalOutcome, startPostpartum, abxActive } from './physio.js';
+import { stepPatient, quietStep, sampleHistory, neonatalOutcome, startPostpartum, abxActive } from './physio.js';
 import { analyzeStrip, annotate } from './monitor.js';
 import { parseOrder } from './orders.js';
 import { HANDLERS } from './drugs.js';
@@ -56,6 +56,28 @@ export class Sim {
     this.floorLog = [];
     resetPatientIds();
     setupScenario(this);
+    this.preroll(40 * MIN);
+  }
+
+  // The day team's patients arrive on the board with 40 min of strip already printed and a last
+  // set of vitals from the day nurse. Runs before t = 0, so nothing pages and nothing is logged.
+  preroll(sec) {
+    const pts = this.patients.filter(p => p.admitT < 0 && p.mon.on);
+    const vitalsT = pts.map(p => -p.mon.r.int(8, 25) * MIN);
+    for (let t = -sec; t < 0; t++) {
+      this.t = t;
+      for (const p of pts) quietStep(p, this, 1);
+      for (const [i, p] of pts.entries()) {
+        if (t !== vitalsT[i]) continue;
+        const T = p.T, r = p.mon.r;
+        p.chart.vitals.push({
+          t, by: 'day RN', sbp: Math.round(T.sbp + r.normal(0, 4)), dbp: Math.round(T.dbp + r.normal(0, 3)), hr: Math.round(T.hr + r.normal(0, 2)),
+          rr: Math.round(T.rr), spo2: Math.round(clamp(T.spo2 + r.normal(0, 0.6), 50, 100)), temp: Math.round((T.temp + r.normal(0, 0.08)) * 10) / 10,
+          ...(p.meds.mag.on || T.mg > 4 ? { reflex: T.reflex } : {}),
+        });
+      }
+    }
+    this.t = 0;
   }
 
   // -------------------------------------------------------------------- time

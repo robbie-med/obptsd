@@ -138,7 +138,7 @@ export function initTruth(p, rng, spec) {
   if (dx.pprom) T.infect = r.range(0, 0.5);
   T.epiFeverH = 0; T.epiHypo = 0; T.epiHypoT = -1; T.epiHypoDepth = 0;
   T.anaph = 0; T.bronch = 0; T.pulmEdema = 0; T.netFluid = 0; T.methSpike = 0;
-  T.severeBpSec = 0; T.stroke = false; T.eclampsiaCount = 0; T.seizingUntil = -1;
+  T.severeBpSec = 0; T.stroke = false; T.eclampsiaCount = 0; T.seizingUntil = -1e9;
   T.fatigue = 0; T.pushIndiv = r.lognormal(1, 0.45);
   T.pain = 0; T.prevNoise = 0;
   T.qblAntepartum = 0;
@@ -216,6 +216,17 @@ export function stepPatient(p, sim, dt = 1) {
   maternalStep(p, sim, E, t, dt);
   fetalStep(p, sim, E, t, dt);
   hazardStep(p, sim, E, t, dt);
+}
+
+// Pre-shift warm-up: the day team's patients have been on the monitor for hours, so their strips
+// should open with history. Contractions, maternal vitals and the fetus run; labor progress and
+// hazards wait for 19:00 (sign-out describes the patient as she is at the start of the shift).
+export function quietStep(p, sim, dt = 1) {
+  const T = p.T, t = sim.t;
+  if (!T._E || t - T._Et >= 10) { T._E = effects(p, t); T._Et = t; T._En = p.meds.doses.length; T._Fn = p.meds.fluidsMl.length; }
+  uterusStep(p, sim, T._E, t, dt);
+  maternalStep(p, sim, T._E, t, dt);
+  fetalStep(p, sim, T._E, t, dt);
 }
 
 function hill(x, ec50, n) { if (x <= 0) return 0; const a = Math.pow(x, n); return a / (a + Math.pow(ec50, n)); }

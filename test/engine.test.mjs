@@ -43,6 +43,19 @@ console.log('determinism');
   check('replay reproduces', sig(d) === sig(e));
 }
 
+console.log('shift start: day-team strips already printed');
+{
+  const s = new Sim({ seed: 'start', mode: 'night' });
+  const pts = s.patients.filter(p => p.area === 'ldr');
+  const traced = pts.filter(p => {
+    const m = p.mon, seen = Array.from(m.fhr.slice(0, m.n4)).filter(v => !isNaN(v)).length;
+    return m.t0 <= -30 * 60 && seen / m.n4 > 0.8;
+  });
+  check('every LDR patient has >= 30 min of tracing at 19:00', pts.length >= 5 && traced.length === pts.length, `${traced.length}/${pts.length}`);
+  check('and a set of vitals from the day nurse', pts.every(p => p.chart.vitals.length && p.chart.vitals[0].t < 0));
+  check('nothing pages before the shift starts', s.msgs.length === 0 && s.t === 0);
+}
+
 console.log('parser');
 {
   const t = (s) => parseOrder(s);
