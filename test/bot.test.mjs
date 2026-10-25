@@ -61,12 +61,12 @@ for (let i = 0; i < nights; i++) {
       const sc = computeScore(sim);
       const del = sim.patients.filter(p => p.outcome);
       const cs = del.filter(p => p.outcome.mode === 'cs').length;
-      const emerg = sim.patients.filter(p => p.sd).length + ' SD, ' + sim.patients.filter(p => p.afe).length + ' AFE';
+      const emerg = sim.patients.filter(p => p.sd).length + ' SD, ' + sim.patients.filter(p => p.crisis).length + ' AFE';
       console.log(`${mode}${cloud ? '+cloud' : ''} ${seed}: ${emerg} · ${Date.now() - t0} ms · ${sim.patients.length} pts · ${del.length} deliveries (${cs} CS) · score ${sc.score} ${sc.grade} · ${sim.cmdLog.length} cmds · pen ${sc.pen.length}`);
       // replay must reproduce exactly
       const re = new Sim({ seed, mode, blackCloud: cloud }); re.loadReplay(sim.cmdLog);
       while (!re.ended) re.run(600);
-      const sig = (s) => s.patients.map(p => p.T.dil.toFixed(5) + ':' + p.T.bd.toFixed(5) + ':' + (p.outcome ? p.outcome.t : '-') + ':' + (p.afe ? p.afe.phase : '')).join('|');
+      const sig = (s) => s.patients.map(p => p.T.dil.toFixed(5) + ':' + p.T.bd.toFixed(5) + ':' + (p.outcome ? p.outcome.t : '-') + ':' + (p.crisis ? p.crisis.phase : '')).join('|');
       if (sig(re) !== sig(sim)) { console.log('  REPLAY MISMATCH'); crashes++; }
     } catch (e) {
       crashes++;

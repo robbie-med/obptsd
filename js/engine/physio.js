@@ -486,7 +486,7 @@ function maternalStep(p, sim, E, t, dt) {
   if (dx.preE === 'severe') T.cr += 0.01 * dt / H;
   if (T.abr > 0 && !T.pp) T.qblAntepartum += (T.abr * 3) * dt / 60;
 
-  if (p.afe) afeStep(p, sim, E, t, dt);
+  if (p.crisis) afeStep(p, sim, E, t, dt);
 
   // MHR channel
   T.mhr = T.hr + 2 * Math.sin(t / 7) ;
@@ -495,7 +495,7 @@ function maternalStep(p, sim, E, t, dt) {
 // Amniotic fluid embolism / maternal arrest on top of everything else (emergency.js runs the
 // state machine). Consumptive coagulopathy, then hypoxia and vasoplegia, then no pulse.
 function afeStep(p, sim, E, t, dt) {
-  const T = p.T, a = p.afe;
+  const T = p.T, a = p.crisis;
   if (a.dicT0 != null && t - a.dicT0 < 40 * 60) T.fib = Math.max(40, T.fib - a.dicRate * dt / 60);
   if (a.phase === 'prodrome') { T.spo2 = Math.max(55, T.spo2 - 4); T.hr = Math.min(190, T.hr + 15); return; }
   if (a.phase === 'arrest') {
@@ -544,7 +544,7 @@ function fetalStep(p, sim, E, t, dt) {
   // head delivered, chest trapped: ~0.02 pH/min [Leung2011]; maternal arrest: no uterine perfusion at all
   if (T.sdActive) T.bd += 1.1 * T.fragility * dt / 60;
   if (T.zav) T.bd += 0.5 * T.fragility * dt / 60;
-  if (p.afe && p.afe.phase === 'arrest') T.bd += 1.4 * T.fragility * dt / 60;
+  if (p.crisis && p.crisis.phase === 'arrest') T.bd += 1.4 * T.fragility * dt / 60;
   // uteroplacental flow
   const mapF = T.map >= 72 ? 1 : clamp(1 - (72 - T.map) * 0.022, 0.25, 1);
   const U = clamp(1 - Math.max(0, T.iup - 20) / 100, 0.08, 1) * mapF * (1 - 0.8 * T.abr) * (T.rupture ? 0.15 : 1);
@@ -666,7 +666,7 @@ function hazardStep(p, sim, E, t, dt) {
   if (T.mgEff >= 22 && !T.flagMgArrest) { T.flagMgArrest = true; sim.emit(p, 'mag_arrest'); }
   if (T.infect > 1 && !T.flagFever) { T.flagFever = true; }
   // amniotic fluid embolism [SMFM-AFE2016]: laboring, membranes ruptured; induction and age raise it
-  if (!p.afe && T.rom && T.laborOnset && (p.area === 'ldr' || p.area === 'triage' || p.area === 'or')) {
+  if (!p.crisis && T.rom && T.laborOnset && (p.area === 'ldr' || p.area === 'triage' || p.area === 'or')) {
     const h = AFE_PER_LABOR_HOUR * (p.meds.pit.rate > 0 ? 1.5 : 1) * (p.age >= 35 ? 1.5 : 1) * sim.rare.afe;
     if (erng(p).chance(h * dt / H)) sim.emit(p, 'afe');
   }

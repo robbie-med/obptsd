@@ -21,8 +21,8 @@ No build step, no dependencies: plain ES modules.
   inductions and sections, triage walk-ins, phone calls, family requests, a nurse shift change at 23:00.
 - **Short shift**: 19:00–23:00, three patients.
 - **Single patient**: one unripe G1 induction and her nurse (spec build step 2).
-- **☁ Black cloud** (menu toggle, any mode): shoulder dystocia ×3, amniotic fluid embolism ×30. For when you want
-  your colleagues to remember the night.
+- **☁ Black cloud** (menu toggle, any mode): shoulder dystocia ×3, amniotic fluid embolism ×75 (roughly one night in
+  four). For when you want your colleagues to remember the night.
 - **Tracing lab**: one laboring patient with sliders for the hidden knobs: placental reserve, Pit, cord
   vulnerability, base deficit, epidural hypotension, fever, ROM/IUPC/FSE, cord prolapse (spec build step 1).
 
@@ -37,14 +37,18 @@ paging you.
   suprapubic, posterior arm, Rubin/Woods, all fours, episiotomy, Zavanelli. Each takes time and has a success rate from
   the literature; repeats work less well. Traction and fundal pressure are available, get nurse pushback, and hurt
   the baby. If you freeze, the nurse does McRoberts at 1 min and the backup OB walks in at 5–9 min.
-- **Amniotic fluid embolism**: rare hazard while laboring with ROM, and right after delivery. "I feel like I'm going
+- **Amniotic fluid embolism**: about 1 in 1,700 births (~15× real life, so it happens at all), while laboring with
+  ROM or right after delivery. "I feel like I'm going
   to die" → collapse (hypoxia, hypotension, fetal bradycardia) → cardiac arrest in ~70% → DIC either way. In the code
   you run epi, LUD, shocks (only VF is shockable), intubation once anesthesia or the code team arrive, and the
   resuscitative hysterotomy at 4 min. Delivery is what gets the pulse back. Anesthesia may be stuck in the OR. Then the
   bleeding: MTP, cryo, FFP, TXA. Mothers can die.
 
+- **Magnesium arrest**: Mg toxicity that gets as far as cardiac arrest runs through the same code (asystole or PEA).
+  Calcium gluconate and stopping the infusion are what bring her back; epi alone mostly doesn't.
+
 Scoring judges the response, not the bad luck: head-to-body interval, traction, arrest-to-delivery (> 5 min), LUD, and
-epinephrine in the first 5 min. Rates and maneuver success are cited in `data.js`.
+epinephrine in the first 5 min, calcium in the first 5 min of a magnesium arrest. Rates and maneuver success are cited in `data.js`.
 
 ## Architecture (`js/engine` is UI-free and runs headless in Node)
 

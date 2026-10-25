@@ -1,7 +1,7 @@
 // Scoring & debrief (SPEC §7). Outcomes, NTSV cesarean rate, process metrics, and the hidden
 // truth laid next to what you were told.
 import { deliveryNTSV } from './patient.js';
-import { SD_MOVES, mmss } from './emergency.js';
+import { SD_MOVES, mmss, CRISIS_LABEL } from './emergency.js';
 
 const H = 3600, MIN = 60;
 
@@ -118,15 +118,16 @@ export function computeScore(sim) {
       if (sd.traction >= 2) add(p, 3, 'Repeated traction on the fetal head during shoulder dystocia');
       if (sd.backup) add(p, 4, 'Shoulder dystocia still undelivered when the backup OB walked in');
     }
-    const a = p.afe;
+    const a = p.crisis;
     if (a) {
-      const bits = [`AFE ${sim.clock(a.t0)}`];
+      const bits = [`${CRISIS_LABEL[a.cause]} ${sim.clock(a.t0)}`];
       if (a.arrestT != null) bits.push(`arrest ${sim.clock(a.arrestT)} (${a.rhythm})`);
       if (a.roscT != null) bits.push(`ROSC after ${mmss(a.roscT - a.arrestT)}`);
       if (a.hystT != null && o && o.pmcd) bits.push(`hysterotomy: baby out ${mmss(o.t - a.arrestT)} into the arrest`);
       if (a.deathT != null) bits.push('maternal death');
       row.events.push(bits.join(' · '));
-      // [AHA2015] judged on the response; AFE itself is neither predictable nor preventable
+      // [AHA2015] judged on the response; AFE itself is neither predictable nor preventable (a magnesium
+      // arrest is, and costs its own 30 points above)
       if (a.arrestT != null) {
         if (a.undeliveredAtArrest) {
           const end = o ? o.t : (a.roscT ?? a.deathT ?? sim.t);
@@ -139,8 +140,9 @@ export function computeScore(sim) {
         const epiLate = a.firstEpiT == null ? (a.roscT ?? a.deathT ?? sim.t) - a.arrestT > 5 * MIN : a.firstEpiT - a.arrestT > 5 * MIN;
         if (epiLate) add(p, 3, 'No IV epinephrine in the first 5 minutes of the arrest');
         if (a.badShock) add(p, 2, 'Shocked a non-shockable rhythm');
+        if (a.cause === 'mag' && (a.firstCaT == null || a.firstCaT - a.arrestT > 5 * MIN)) add(p, 5, 'No calcium gluconate in the first 5 minutes of a magnesium arrest');
       }
-      if (a.deathT != null) add(p, 30, 'Maternal death (AFE kills even with perfect care)');
+      if (a.deathT != null) add(p, 30, a.cause === 'afe' ? 'Maternal death (AFE kills even with perfect care)' : 'Maternal death');
     }
     rows.push(row);
   }

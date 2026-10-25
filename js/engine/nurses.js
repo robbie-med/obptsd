@@ -67,7 +67,7 @@ export function nurseTick(sim, nurse, p) {
     lastBpPage: -1e9, severePending: null, lastPushUpdate: -1e9, lastBleedPage: -1e9, resusT: -1e9, lostCount: 0, lastLostReq: -1e9 });
   const t = sim.t, T = p.T, r = sim.nrng;
   if (p.area === 'or' || p.area === 'offsite' || p.area === 'home' || p.status === 'gone') return;
-  if ((p.sd && p.sd.active) || (p.afe && ['collapse', 'arrest'].includes(p.afe.phase))) return; // everyone's hands are busy
+  if ((p.sd && p.sd.active) || (p.crisis && ['collapse', 'arrest'].includes(p.crisis.phase))) return; // everyone's hands are busy
 
   // ---- vitals
   const dx = p.dx;

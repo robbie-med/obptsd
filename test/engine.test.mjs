@@ -171,14 +171,14 @@ console.log('amniotic fluid embolism / maternal arrest');
       let acted = false, cut = false;
       for (let k = 0; k < 6 * 40; k++) {
         sim.run(10);
-        const a = p.afe;
+        const a = p.crisis;
         if (respond && a.phase === 'arrest' && !acted) {
           acted = true;
           for (const t of ['LUD', 'epinephrine 1 mg IV']) sim.command({ type: 'order', pid: p.id, text: t });
         }
         if (respond && a.phase === 'arrest' && !cut && sim.t - a.arrestT >= 230) { cut = true; sim.command({ type: 'order', pid: p.id, text: 'resuscitative hysterotomy' }); }
       }
-      const a = p.afe;
+      const a = p.crisis;
       if (a.arrestT != null) {
         if (respond) arrests++;
         if (cut) cuts++;
@@ -197,20 +197,43 @@ console.log('amniotic fluid embolism / maternal arrest');
   check('LUD + epi + hysterotomy beats doing nothing', roscResp > roscNone, `ROSC ${roscResp} vs ${roscNone}`);
 }
 
+console.log('magnesium arrest');
+{
+  let roscCa = 0, roscNone = 0, held = 0, routed = 0, button = 0;
+  for (let i = 0; i < 12; i++) {
+    for (const respond of [true, false]) {
+      const sim = new Sim({ seed: 'mgx' + i, mode: 'single' });
+      const p = sim.patients[0];
+      sim.startMag(p, 4, 2);
+      sim.run(600);
+      sim.emit(p, 'mag_arrest');
+      if (p.crisis && p.crisis.cause === 'mag' && p.crisis.phase === 'arrest') routed++;
+      if (sim.msgs.some(m => m.prio >= 3 && m.actions.some(a => /Calcium/.test(a.label)))) button++;
+      if (respond) for (const t of ['calcium gluconate 1 g IV', 'stop mag', 'epinephrine 1 mg IV']) sim.command({ type: 'order', pid: p.id, text: t });
+      sim.run(20 * 60);
+      if (respond && p.chart.orders.some(x => /Calcium/.test(x.label) && x.status !== 'done')) held++;
+      if (p.crisis.roscT != null) respond ? roscCa++ : roscNone++;
+    }
+  }
+  check('mag_arrest runs through the code system', routed === 24 && button === 24, `${routed}/24 routed, ${button}/24 with a calcium button`);
+  check('code calcium is not held', held === 0);
+  check('calcium + stop mag beats doing nothing', roscCa > roscNone + 3, `ROSC ${roscCa}/12 vs ${roscNone}/12`);
+}
+
 console.log('black cloud');
 {
   let sd = 0, afe = 0;
   for (const seed of ['bc1', 'bc2', 'bc3', 'bc4', 'bc5', 'bc6']) {
     const sim = new Sim({ seed, mode: 'night', blackCloud: true });
     sim.run(12 * H);
-    sd += sim.patients.filter(p => p.sd).length; afe += sim.patients.filter(p => p.afe).length;
+    sd += sim.patients.filter(p => p.sd).length; afe += sim.patients.filter(p => p.crisis).length;
     computeScore(sim);
   }
   check('black-cloud nights produce dystocias and AFEs', sd + afe >= 2, `${sd} SD, ${afe} AFE over 6 nights (no orders)`);
   const a = new Sim({ seed: 'bcrep', mode: 'night', blackCloud: true }); a.run(2 * H);
   a.command({ type: 'order', pid: a.patients[1].id, text: 'pit up 2' }); a.run(4 * H);
   const b = new Sim({ seed: 'bcrep', mode: 'night', blackCloud: true }); b.loadReplay(a.cmdLog); b.run(6 * H);
-  const sig = (s) => s.patients.map(p => p.T.dil.toFixed(6) + p.T.bd.toFixed(6) + (p.afe ? p.afe.phase : '') + (p.sd ? p.sd.hbdi : '')).join('|') + s.msgs.length;
+  const sig = (s) => s.patients.map(p => p.T.dil.toFixed(6) + p.T.bd.toFixed(6) + (p.crisis ? p.crisis.phase : '') + (p.sd ? p.sd.hbdi : '')).join('|') + s.msgs.length;
   check('black-cloud replay reproduces', sig(a) === sig(b));
 }
 

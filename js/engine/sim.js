@@ -10,7 +10,7 @@ import { HANDLERS } from './drugs.js';
 import { makeNurse, nurseExam, nurseTick, sveString } from './nurses.js';
 import { setupScenario } from './scenario.js';
 import { resetPatientIds } from './patient.js';
-import { maybeShoulderDystocia, startAFE, realtimeEmergency, erng, AFE_AT_DELIVERY } from './emergency.js';
+import { maybeShoulderDystocia, startAFE, startMagArrest, realtimeEmergency, erng, AFE_AT_DELIVERY } from './emergency.js';
 
 const MIN = 60, H = 3600;
 export const START_CLOCK = 19 * H;
@@ -23,7 +23,7 @@ export class Sim {
     this.teaching = !!this.opts.teaching;
     // "black cloud": the resident everything happens to. Multiplies the rare emergencies.
     this.blackCloud = !!this.opts.blackCloud;
-    this.rare = this.blackCloud ? { sd: 3, afe: 30 } : { sd: 1, afe: 1 };
+    this.rare = this.blackCloud ? { sd: 3, afe: 75 } : { sd: 1, afe: 1 };
     this.rng = new Rng(this.seed);
     this.nrng = this.rng.fork('nurses');
     this.orng = this.rng.fork('orders');
@@ -569,9 +569,9 @@ export class Sim {
     if (!p.T.pp || p.status === 'gone') return;
     const pp = p.T.pp;
     const s = this.t - pp.t0;
-    if (p.afe) {
+    if (p.crisis) {
       // AFE survivors go to the ICU once stable and not pouring blood; until then they stay
-      if (p.afe.phase === 'stable' && pp.bleed < 3 && p.area !== 'or' && this.t - p.afe.stableT > 20 * MIN) this.transferOut(p, 'to the ICU');
+      if (p.crisis.phase === 'stable' && pp.bleed < 3 && p.area !== 'or' && this.t - p.crisis.stableT > 20 * MIN) this.transferOut(p, 'to the ICU');
       return;
     }
     if (s > 2 * H && pp.bleed < 2.5 && (p.area === 'ldr' || p.area === 'pacu')) this.transferOut(p, p.area === 'pacu' ? 'from PACU to postpartum' : 'to postpartum');
@@ -746,7 +746,7 @@ export class Sim {
     if (neo.liveborn) this.after(15 * MIN, () => this.msg('Lab', 'lab', p, `Cord gas (arterial): pH ${neo.pH.toFixed(2)}, BD ${neo.bd}.`, neo.pH < 7.1 ? 2 : 0));
     if (mode !== 'cs' && mode !== 'home' && p.area === 'triage') { const room = this.freeRoom(); if (room) { this.vacate(p, 0); this.placeInRoom(p, room); } }
     if (p.area === 'ldr' || p.area === 'triage') p.status = 'recovery';
-    if (!p.afe && mode !== 'home') {
+    if (!p.crisis && mode !== 'home') {
       const r = erng(p);
       if (r.chance(AFE_AT_DELIVERY * (mode === 'cs' ? 2 : 1) * (extra.vacuum ? 1.5 : 1) * this.rare.afe)) this.after(r.range(1, 20) * MIN, () => startAFE(this, p));
     }
@@ -1000,8 +1000,7 @@ export class Sim {
         startAFE(this, p);
         return;
       case 'mag_arrest':
-        this.page(p, `CODE BLUE — ${p.room}!`, 3);
-        (p.harms || (p.harms = [])).push({ t: this.t, kind: 'cardiac_arrest' });
+        startMagArrest(this, p);
         return;
       case 'foley_out':
         if (offFloor) return;

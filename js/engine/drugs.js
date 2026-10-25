@@ -282,7 +282,7 @@ export const HANDLERS = {
   magnesium: {
     prepare(o, p, sim) {
       const mg = p.meds.mag;
-      if (o.stop) return { ok: true, label: 'Magnesium OFF', issues: [], delay: NURSE_TASK, who: 'nurse', run: () => sim.stopMag(p) };
+      if (o.stop) return { ok: true, label: 'Magnesium OFF', issues: [], delay: inArrest(p) ? [0.1, 0.3] : NURSE_TASK, who: 'nurse', run: () => sim.stopMag(p) };
       const gq = o.qty.filter(q => q.unit === 'g' || q.unit == null || q.unit === 'mg');
       let load = null, rate = null;
       for (const q of gq) {
@@ -425,13 +425,15 @@ export const HANDLERS = {
     onRun(p, sim) { if (p.asthma) sim.harm(p, 'bronchospasm'); },
   }),
   calcium: bolusDrug({ drug: 'calcium', label: 'Calcium gluconate', unit: 'mg', routes: ['IV'], defRoute: 'IV', typical: [1000, 1000], softMax: 3000, hardMax: 6000, default: 1000, gramsIfSmall: true,
-    extraIssues(p) { return p.meds.mag.on || p.T.mg > 4 ? [] : [nurse(`She's not on mag — calcium for what?`, 1)]; } }),
+    codeDose(p) { return inArrest(p); },
+    extraIssues(p) { return p.meds.mag.on || p.T.mg > 4 ? [] : [nurse(`She's not on mag — calcium for what?`, 1)]; },
+    onRun(p, sim) { if (inArrest(p) && p.crisis.firstCaT == null) p.crisis.firstCaT = sim.t; } }),
   phenylephrine: bolusDrug({ drug: 'phenylephrine', label: 'Phenylephrine', unit: 'mcg', routes: ['IV'], defRoute: 'IV', typical: [50, 200], softMax: 200, hardMax: 1000, default: 100 }),
   ephedrine: bolusDrug({ drug: 'ephedrine', label: 'Ephedrine', unit: 'mg', routes: ['IV'], defRoute: 'IV', typical: [5, 10], softMax: 25, hardMax: 50, default: 10 }),
   epinephrine: bolusDrug({ drug: 'epinephrine', label: 'Epinephrine', unit: 'mg', routes: ['IM', 'IV'], defRoute: 'IM', typical: [0.3, 0.5], softMax: 0.5, hardMax: 1, default: 0.3,
     codeDose(p, route) { return route === 'IV' && inArrest(p); },
     extraIssues(p, sim, amt, route) { return route === 'IV' && amt >= 0.3 ? [pharm('Epinephrine IV bolus ≥0.3 mg outside of a code — did you mean IM?')] : []; },
-    onRun(p, sim) { if (inArrest(p) && p.afe.firstEpiT == null) p.afe.firstEpiT = sim.t; } }),
+    onRun(p, sim) { if (inArrest(p) && p.crisis.firstEpiT == null) p.crisis.firstEpiT = sim.t; } }),
   albuterol: bolusDrug({ drug: 'albuterol', label: 'Albuterol neb', unit: 'mg', routes: ['NEB'], softRoutes: ['PO', 'IV'], defRoute: 'NEB', typical: [2.5, 5], softMax: 5, hardMax: 10, default: 2.5,
     onRun(p) { p.T.bronch = Math.max(0, p.T.bronch - 0.5); } }),
   fluids: {
@@ -639,15 +641,15 @@ export const HANDLERS = {
   },
   help: {
     prepare(o, p, sim) {
-      if (p.afe && ['collapse', 'arrest'].includes(p.afe.phase)) return HANDLERS.code.prepare(o, p, sim);
+      if (p.crisis && ['collapse', 'arrest'].includes(p.crisis.phase)) return HANDLERS.code.prepare(o, p, sim);
       if (!p.sd || !p.sd.active) return { ok: false, err: 'Help with what? (For the OR team: "call backup".)' };
       return { ok: true, label: 'Call for help (NICU, charge, backup OB)', issues: [], delay: [0, 0], who: 'md', run: () => callHelp(sim, p) };
     },
   },
   code: {
     prepare(o, p, sim) {
-      if (!p.afe || !['collapse', 'arrest'].includes(p.afe.phase)) return { ok: false, err: 'She has a pulse and she is talking to you.' };
-      if (p.afe.codeT != null) return { ok: false, err: 'The code is already called — they\'re on the way.' };
+      if (!p.crisis || !['collapse', 'arrest'].includes(p.crisis.phase)) return { ok: false, err: 'She has a pulse and she is talking to you.' };
+      if (p.crisis.codeT != null) return { ok: false, err: 'The code is already called — they\'re on the way.' };
       return { ok: true, label: 'Code blue', issues: [], delay: [0, 0], who: 'md', run: () => callCode(sim, p) };
     },
   },
@@ -655,14 +657,14 @@ export const HANDLERS = {
     prepare(o, p, sim) {
       if (delivered(p)) return { ok: false, err: 'She has delivered — nothing to displace.' };
       if (!inArrest(p)) return { ok: false, err: 'She is not in arrest. (Tilt her: "left lateral".)' };
-      if (p.afe.lud) return { ok: false, err: 'Someone is already holding the uterus over.' };
-      return { ok: true, label: 'Manual left uterine displacement', issues: [], delay: [0.2, 0.5], who: 'nurse', run: () => { p.afe.lud = true; sim.nurseSays(p, `I've got the uterus pushed over to the left. Keep going.`, 1); } };
+      if (p.crisis.lud) return { ok: false, err: 'Someone is already holding the uterus over.' };
+      return { ok: true, label: 'Manual left uterine displacement', issues: [], delay: [0.2, 0.5], who: 'nurse', run: () => { p.crisis.lud = true; sim.nurseSays(p, `I've got the uterus pushed over to the left. Keep going.`, 1); } };
     },
   },
   defib: {
     prepare(o, p, sim) {
       if (!inArrest(p)) return { ok: false, err: 'She has a pulse.' };
-      const a = p.afe;
+      const a = p.crisis;
       const shockable = a.rhythm === 'VF';
       const known = a.lastCheck ? a.lastCheck.rhythm : null;
       const issues = known && known !== 'VF' ? [nurse(`That's ${known} — not a shockable rhythm.`, 3)] : [];
@@ -675,7 +677,7 @@ export const HANDLERS = {
   },
   intubate: {
     prepare(o, p, sim) {
-      const a = p.afe;
+      const a = p.crisis;
       if (!a || !['collapse', 'arrest', 'rosc'].includes(a.phase)) return { ok: false, err: 'Anesthesia: "She is talking to me. I am not intubating her."' };
       if (a.intubated) return { ok: false, err: 'She is already intubated.' };
       const t = sim.t;
@@ -687,8 +689,8 @@ export const HANDLERS = {
   hysterotomy: {
     prepare(o, p, sim) {
       if (delivered(p)) return { ok: false, err: 'The baby is already out.' };
-      if (!inArrest(p)) return { ok: false, err: p.afe ? 'She has a pulse — if she needs delivery, call a STAT section.' : 'She is not in arrest.' };
-      if (p.afe.hystT != null) return { ok: false, err: 'You are already cutting.' };
+      if (!inArrest(p)) return { ok: false, err: p.crisis ? 'She has a pulse — if she needs delivery, call a STAT section.' : 'She is not in arrest.' };
+      if (p.crisis.hystT != null) return { ok: false, err: 'You are already cutting.' };
       if (p.gaDays < 140) return { ok: false, err: 'Under 20 weeks the uterus is not compressing the cava — no benefit.' };
       return { ok: true, label: 'Resuscitative hysterotomy (you, at the bedside)', issues: [], delay: [0, 0], who: 'md', run: () => hysterotomy(sim, p) };
     },

@@ -8,7 +8,7 @@ import { CS_INDICATIONS } from '../engine/data.js';
 import { ntsvNow } from '../engine/scoring.js';
 import { drawStrip, drawMini } from './strip.js';
 import { showDebrief } from './debrief.js';
-import { realtimeEmergency, SD_MOVES, mmss } from '../engine/emergency.js';
+import { realtimeEmergency, SD_MOVES, mmss, CRISIS_LABEL } from '../engine/emergency.js';
 
 const $ = (s) => document.querySelector(s);
 const H = 3600, MIN = 60;
@@ -41,7 +41,7 @@ function showMenu(first = false) {
     <div class="row"><label>Seed <input id="seedIn" value="${esc(seed)}" style="width:180px"></label>
       <button id="rndSeed" class="ghost small">🎲</button>
       <label class="toggle"><input type="checkbox" id="teachIn"> teaching mode (show hidden truth live)</label>
-      <label class="toggle" title="Shoulder dystocia ×3, amniotic fluid embolism ×30"><input type="checkbox" id="cloudIn"> ☁ black cloud (the rare disasters stop being rare)</label></div>
+      <label class="toggle" title="Shoulder dystocia ×3, amniotic fluid embolism ×75"><input type="checkbox" id="cloudIn"> ☁ black cloud (the rare disasters stop being rare)</label></div>
     <div class="btnrow">
       <button id="startBtn" class="big-btn">Start shift</button>
       ${ui.sim && !ui.ended ? '<button id="resumeBtn">Resume</button>' : ''}
@@ -254,7 +254,7 @@ function renderAll() {
 // check. Never p.T.
 function renderEmerg() {
   const s = ui.sim, el = $('#emerg');
-  const list = s.patients.filter(p => p.status !== 'gone' && (realtimeEmergency(p) || (p.afe && p.afe.phase === 'rosc')));
+  const list = s.patients.filter(p => p.status !== 'gone' && (realtimeEmergency(p) || (p.crisis && p.crisis.phase === 'rosc')));
   if (!list.length) { if (!el.classList.contains('hidden')) { el.innerHTML = ''; el.classList.add('hidden'); } return; }
   el.classList.remove('hidden');
   const B = (p, label, text) => `<button data-pid="${p.id}" data-order="${esc(text)}"${ui.replay ? ' disabled' : ''}>${esc(label)}</button>`;
@@ -269,7 +269,7 @@ function renderEmerg() {
         <div class="emline">${tried.length ? 'Tried: ' + esc(tried.join(', ')) : 'Nothing tried yet.'}${now.length ? ' · Now: ' + esc(now.join(', ')) : ''}${sd.help ? ' · help called' : ''}</div>
         <div class="emb">${B(p, 'McRoberts', 'McRoberts')}${B(p, 'Suprapubic', 'suprapubic pressure')}${B(p, 'Posterior arm', 'deliver posterior arm')}${B(p, 'Rubin / Woods', 'woods screw')}${B(p, 'All fours', 'gaskin all fours')}${B(p, 'Episiotomy', 'episiotomy')}${B(p, 'Pull harder', 'traction')}${B(p, 'Fundal pressure', 'fundal pressure')}${B(p, 'Zavanelli', 'Zavanelli')}${sd.help ? '' : B(p, 'Call for help', 'call for help')}</div></div>`;
     }
-    const a = p.afe;
+    const a = p.crisis;
     if (!a) continue;
     const pregnant = !p.outcome && p.gaDays >= 140;
     const blood = B(p, 'MTP', 'massive transfusion') + B(p, 'Cryo 10 u', 'cryo 10 units') + B(p, 'FFP 4 u', 'FFP 4 units') + B(p, 'TXA 1 g', 'TXA 1 g IV') + B(p, 'Fibrinogen', 'fibrinogen');
@@ -286,12 +286,15 @@ function renderEmerg() {
       const lastEpi = epi && epi.t >= a.arrestT ? `last epi ${mmss(s.t - epi.t)} ago` : 'no epi yet';
       const rhythm = a.lastCheck ? `${a.lastCheck.rhythm} at ${mmss(a.lastCheck.t - a.arrestT)}` : 'pads going on';
       const team = a.teamT != null && s.t >= a.teamT ? 'code team here' : a.codeT != null ? 'code team coming' : 'code not called';
+      const mag = a.cause === 'mag';
+      const ca = s.lastDose(p, 'calcium');
+      const magLine = mag ? ` · ${ca && ca.t >= a.arrestT ? 'calcium in' : 'no calcium yet'} · ${p.meds.mag.on ? '<b>MAG STILL RUNNING</b>' : 'mag off'}` : '';
       h += `<div class="em" data-pid="${p.id}"><div class="emh"><b>CODE BLUE</b><span>${who}</span><span class="emsub">no pulse</span><span class="emclock">${mmss(s.t - a.arrestT)}</span></div>
-        <div class="emline">Rhythm: ${esc(rhythm)} · ${lastEpi} · ${team} · ${a.intubated ? 'intubated' : 'bag-mask'}${pregnant ? ` · ${a.lud ? 'LUD on' : 'NO uterine displacement'} · <b>still pregnant</b>${a.hystT != null ? ' — cutting' : ''}` : ''}</div>
-        <div class="emb">${B(p, 'Epi 1 mg IV', 'epinephrine 1 mg IV')}${pregnant && !a.lud ? B(p, 'LUD', 'LUD') : ''}${pregnant && a.hystT == null ? B(p, 'Resuscitative hysterotomy', 'resuscitative hysterotomy') : ''}${B(p, 'Shock', 'defibrillate')}${a.intubated ? '' : B(p, 'Intubate', 'intubate')}${a.codeT == null ? B(p, 'Code blue', 'code blue') : ''}${blood}</div></div>`;
+        <div class="emline">Rhythm: ${esc(rhythm)} · ${lastEpi} · ${team} · ${a.intubated ? 'intubated' : 'bag-mask'}${magLine}${pregnant ? ` · ${a.lud ? 'LUD on' : 'NO uterine displacement'} · <b>still pregnant</b>${a.hystT != null ? ' — cutting' : ''}` : ''}</div>
+        <div class="emb">${mag ? B(p, 'Calcium gluconate 1 g', 'calcium gluconate 1 g IV') + (p.meds.mag.on ? B(p, 'Stop mag', 'stop mag') : '') : ''}${B(p, 'Epi 1 mg IV', 'epinephrine 1 mg IV')}${pregnant && !a.lud ? B(p, 'LUD', 'LUD') : ''}${pregnant && a.hystT == null ? B(p, 'Resuscitative hysterotomy', 'resuscitative hysterotomy') : ''}${B(p, 'Shock', 'defibrillate')}${a.intubated ? '' : B(p, 'Intubate', 'intubate')}${a.codeT == null ? B(p, 'Code blue', 'code blue') : ''}${blood}</div></div>`;
     } else if (a.phase === 'rosc') {
       h += `<div class="em post" data-pid="${p.id}"><div class="emh"><b>POST-ARREST</b><span>${who}</span><span class="emsub">ROSC</span><span class="emclock">${mmss(s.t - a.roscT)}</span></div>
-        <div class="emline">Pulse back after ${mmss(a.roscT - a.arrestT)}. ${pregnant ? 'Still pregnant.' : 'Watch the bleeding — AFE means DIC.'}</div>
+        <div class="emline">Pulse back after ${mmss(a.roscT - a.arrestT)}. ${pregnant ? 'Still pregnant.' : a.cause === 'afe' ? 'Watch the bleeding — AFE means DIC.' : p.meds.mag.on ? 'The magnesium is still running.' : ''}</div>
         <div class="emb">${B(p, 'Phenylephrine 100', 'phenylephrine 100 mcg IV')}${a.intubated ? '' : B(p, 'Intubate', 'intubate')}${pregnant ? B(p, 'C-section STAT', 'c-section stat for maternal collapse') : ''}${blood}</div></div>`;
     }
   }
@@ -322,8 +325,8 @@ function knownStatus(p, s) {
     return bits.join(' · ');
   }
   if (p.sd && p.sd.active) return `<b style="color:var(--red)">SHOULDER DYSTOCIA ${mmss(s.t - p.sd.t0)}</b>`;
-  if (p.afe && p.afe.phase === 'arrest') return `<b style="color:var(--red)">CODE BLUE ${mmss(s.t - p.afe.arrestT)}</b>`;
-  if (p.afe && p.afe.phase === 'collapse') return `<b style="color:var(--red)">COLLAPSE</b>`;
+  if (p.crisis && p.crisis.phase === 'arrest') return `<b style="color:var(--red)">CODE BLUE ${mmss(s.t - p.crisis.arrestT)}</b>`;
+  if (p.crisis && p.crisis.phase === 'collapse') return `<b style="color:var(--red)">COLLAPSE</b>`;
   if (p.flags.maternalDeath) return `Died ${s.clock(p.flags.maternalDeath)}`;
   if (p.area === 'or') return `In ${p.room} — ${p.csRequest ? p.csRequest.urgency : ''} section`;
   if (p.area === 'preop') return `Pre-op · ${p.csRequest ? 'CS at ' + s.clock(p.csRequest.notBefore || p.csRequest.reqT) : ''}`;
@@ -366,7 +369,7 @@ function truthLine(p) {
   const T = p.T;
   if (!ui.view.teaching) return '';
   const pH = 7.31 - 0.019 * (T.bd - 3) - 0.11 * T.resp;
-  return `<div class="truth">truth: ${T.dil.toFixed(1)} cm, sta ${T.station.toFixed(1)}, R ${T.R.toFixed(2)} · BD ${T.bd.toFixed(1)} pH≈${pH.toFixed(2)} · plac ${T.plac.toFixed(2)}${p.sd && p.sd.active ? ` · SD difficulty ×${p.sd.k.toFixed(2)}` : ''}${p.afe ? ` · AFE ${p.afe.phase}${p.afe.phase === 'arrest' ? ' ' + p.afe.rhythm : ''}, fib ${Math.round(T.fib)}` : ''}${T.prolapse ? ' · PROLAPSE' : ''}${T.abr ? ' · abruption ' + T.abr.toFixed(2) : ''}${T.infect > 1 ? ' · Triple I' : ''}${T.demise ? ' · DEMISE' : ''}</div>`;
+  return `<div class="truth">truth: ${T.dil.toFixed(1)} cm, sta ${T.station.toFixed(1)}, R ${T.R.toFixed(2)} · BD ${T.bd.toFixed(1)} pH≈${pH.toFixed(2)} · plac ${T.plac.toFixed(2)}${p.sd && p.sd.active ? ` · SD difficulty ×${p.sd.k.toFixed(2)}` : ''}${p.crisis ? ` · ${CRISIS_LABEL[p.crisis.cause]} ${p.crisis.phase}${p.crisis.phase === 'arrest' ? ' ' + p.crisis.rhythm : ''}, fib ${Math.round(T.fib)}` : ''}${T.prolapse ? ' · PROLAPSE' : ''}${T.abr ? ' · abruption ' + T.abr.toFixed(2) : ''}${T.infect > 1 ? ' · Triple I' : ''}${T.demise ? ' · DEMISE' : ''}</div>`;
 }
 function unreadCount(pid) { let n = 0, hi = 0; for (const m of ui.sim.msgs) if (m.pid === pid && !m.read && m.prio >= 1) { n++; hi = Math.max(hi, m.prio); } return [n, hi]; }
 

@@ -1,6 +1,7 @@
-// Emergencies that run in real time (SPEC §6): shoulder dystocia, and amniotic fluid embolism with
-// maternal cardiac arrest. State lives on the patient (p.sd, p.afe); physio.js reads it to drive the
-// mother and the fetus, sim.js routes vaginal births and the maneuver/code orders here.
+// Emergencies that run in real time (SPEC §6): shoulder dystocia, and maternal crises (amniotic fluid
+// embolism, magnesium toxicity) that can end in cardiac arrest. State lives on the patient (p.sd,
+// p.crisis with a .cause); physio.js reads it to drive the mother and the fetus, sim.js routes vaginal
+// births and the maneuver/code orders here.
 // Literature anchors are listed in data.js ([ACOG-PB178], [Hoffman2011], [Gherman1997], [Bruner1998],
 // [Leung2011], [AHA2015], [SMFM-AFE2016]).
 import { clamp } from './util.js';
@@ -10,9 +11,9 @@ const MIN = 60;
 // Per-patient stream for emergencies, separate from the physiology stream so that a shoulder
 // dystocia roll can't shift every later contraction.
 export function erng(p) { return p.T.erng || (p.T.erng = p.T.rng.fork('emergency')); }
-export function inArrest(p) { return !!(p.afe && p.afe.phase === 'arrest'); }
+export function inArrest(p) { return !!(p.crisis && p.crisis.phase === 'arrest'); }
 export function realtimeEmergency(p) {
-  return !!((p.sd && p.sd.active) || (p.afe && ['prodrome', 'collapse', 'arrest'].includes(p.afe.phase)));
+  return !!((p.sd && p.sd.active) || (p.crisis && ['prodrome', 'collapse', 'arrest'].includes(p.crisis.phase)));
 }
 export function mmss(sec) { sec = Math.max(0, Math.floor(sec)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
 
@@ -182,26 +183,34 @@ function finishShoulder(sim, p, tr) {
   }
 }
 
-// ============================================================================ amniotic fluid embolism
-// Real incidence ~2-6 per 100,000 births [SMFM-AFE2016]. These rates are ~30-40x that, so it exists in
+// ============================================================================ maternal crises
+// AFE: real incidence ~2-6 per 100,000 births [SMFM-AFE2016], call it 1 in 25,000. These two hazards add
+// up to ~1 in 1,700 births on this floor (~15x real life, measured over simulated nights), so it exists in
 // the game at all; "black cloud" multiplies again. Onset: sudden hypoxia, hypotension, arrest, DIC.
-export const AFE_PER_LABOR_HOUR = 1.5e-4;  // laboring with ruptured membranes
-export const AFE_AT_DELIVERY = 5e-4;       // onset within ~20 min of birth (x2 for cesarean)
+export const AFE_PER_LABOR_HOUR = 9e-5;  // laboring with ruptured membranes (~2.6 h per birth on this floor)
+export const AFE_AT_DELIVERY = 2.5e-4;   // onset within ~20 min of birth (x2 for cesarean)
+export const CRISIS_LABEL = { afe: 'AFE', mag: 'Magnesium arrest' };
 
 export function codeActions(p) {
   const A = (label, text) => ({ label, cmd: { type: 'order', pid: p.id, text } });
   const pregnant = !p.outcome && p.gaDays >= 140;
-  return [A('Epi 1 mg IV', 'epinephrine 1 mg IV'), ...(pregnant ? [A('Left uterine displacement', 'LUD'), A('Resuscitative hysterotomy', 'resuscitative hysterotomy')] : []),
-    A('Shock', 'defibrillate'), A('Intubate', 'intubate'), A('MTP', 'massive transfusion')];
+  const mag = p.crisis && p.crisis.cause === 'mag';
+  return [...(mag ? [A('Calcium gluconate 1 g', 'calcium gluconate 1 g IV'), A('Stop mag', 'stop mag')] : []), A('Epi 1 mg IV', 'epinephrine 1 mg IV'),
+    ...(pregnant ? [A('Left uterine displacement', 'LUD'), A('Resuscitative hysterotomy', 'resuscitative hysterotomy')] : []),
+    A('Shock', 'defibrillate'), A('Intubate', 'intubate'), ...(mag ? [] : [A('MTP', 'massive transfusion')])];
+}
+
+function newCrisis(sim, p, cause, o) {
+  p.crisis = { cause, t0: sim.t, phase: o.phase, sev: o.sev, willArrest: o.willArrest, rhythm: o.rhythm, lud: false, codeT: null, teamT: null,
+    anesT: null, anes: null, intubated: false, shocks: 0, badShock: 0, shocked: false, cycles: 0, arrestT: null, roscT: null, deathT: null,
+    hystT: null, lastCheck: null, firstEpiT: null, firstCaT: null, dicT0: null, dicRate: 0, undeliveredAtArrest: false };
+  return p.crisis;
 }
 
 export function startAFE(sim, p) {
-  if (p.afe || p.status === 'gone' || !['ldr', 'triage', 'or', 'pacu'].includes(p.area)) return;
+  if (p.crisis || p.status === 'gone' || !['ldr', 'triage', 'or', 'pacu'].includes(p.area)) return;
   const r = erng(p);
-  p.afe = { t0: sim.t, phase: 'prodrome', sev: r.range(0.7, 1.4), willArrest: r.chance(0.7),
-    rhythm: r.weighted([['PEA', 0.55], ['VF', 0.25], ['asystole', 0.2]]), lud: false, codeT: null, teamT: null, anesT: null, anes: null,
-    intubated: false, shocks: 0, badShock: 0, shocked: false, cycles: 0, arrestT: null, roscT: null, deathT: null, hystT: null,
-    lastCheck: null, firstEpiT: null, dicT0: null, dicRate: 0, undeliveredAtArrest: false };
+  newCrisis(sim, p, 'afe', { phase: 'prodrome', sev: r.range(0.7, 1.4), willArrest: r.chance(0.7), rhythm: r.weighted([['PEA', 0.55], ['VF', 0.25], ['asystole', 0.2]]) });
   sim.logTruth(p, 'AMNIOTIC FLUID EMBOLISM');
   const first = p.name.split(' ')[0];
   const text = `${first} suddenly says something is wrong — "I feel like I'm going to die." She can't catch her breath and keeps pulling at her gown.`;
@@ -213,7 +222,7 @@ export function startAFE(sim, p) {
 function afeAtony(p) { if (p.T.pp) p.T.pp.toneBase = Math.min(p.T.pp.toneBase, 0.4); }
 
 function collapse(sim, p) {
-  const a = p.afe, r = erng(p);
+  const a = p.crisis, r = erng(p);
   if (a.phase !== 'prodrome') return;
   a.phase = 'collapse'; a.collapseT = sim.t;
   a.dicT0 = sim.t; a.dicRate = r.range(6, 12) * a.sev; // mg/dL fibrinogen per minute, for ~40 min
@@ -230,8 +239,21 @@ function collapse(sim, p) {
   else sim.after(r.range(20, 40) * MIN, () => { if (a.phase === 'collapse') { a.phase = 'stable'; a.stableT = sim.t; sim.logTruth(p, 'AFE: stabilized without arrest'); } });
 }
 
+// Hypermagnesemia stops the heart in diastole: bradycardia and heart block into asystole/PEA. Calcium is the
+// antidote; with the infusion still running the level keeps climbing [ACOG-PB222].
+export function startMagArrest(sim, p) {
+  if (p.status === 'gone' || !['ldr', 'triage', 'or', 'pacu'].includes(p.area)) return;
+  if (p.crisis && ['prodrome', 'collapse', 'arrest', 'dead'].includes(p.crisis.phase)) return;
+  // a survivor of an earlier crisis gets a new one; the earlier record is replaced (rare enough)
+  const r = erng(p);
+  newCrisis(sim, p, 'mag', { phase: 'collapse', sev: 1, willArrest: true, rhythm: r.chance(0.55) ? 'asystole' : 'PEA' });
+  p.crisis.collapseT = sim.t;
+  sim.logTruth(p, `MAGNESIUM ARREST (Mg ${p.T.mg.toFixed(1)} mg/dL)`);
+  arrest(sim, p);
+}
+
 function arrest(sim, p) {
-  const a = p.afe, r = erng(p);
+  const a = p.crisis, r = erng(p);
   if (a.phase !== 'collapse') return;
   a.phase = 'arrest'; a.arrestT = sim.t;
   a.undeliveredAtArrest = !p.outcome && p.gaDays >= 140;
@@ -251,7 +273,7 @@ function arrest(sim, p) {
 }
 
 export function callCode(sim, p, auto = false) {
-  const a = p.afe;
+  const a = p.crisis;
   if (!a || !['collapse', 'arrest'].includes(a.phase)) return { ok: false, msg: 'She has a pulse and she is talking to you.' };
   if (a.codeT != null) return { ok: false, msg: 'The code is already called.' };
   a.codeT = sim.t;
@@ -282,7 +304,7 @@ export function callCode(sim, p, auto = false) {
 }
 
 function releaseAnes(sim, p) {
-  const a = p.afe;
+  const a = p.crisis;
   if (a.anes && a.anes.task && a.anes.task.kind === 'code') { a.anes.task = null; a.anes.busyUntil = sim.t; }
   a.anes = null;
 }
@@ -290,7 +312,7 @@ function teamHere(sim, a) { return a.teamT != null && sim.t >= a.teamT; }
 function airwayHere(sim, a) { return teamHere(sim, a) || (a.anesT != null && sim.t >= a.anesT); }
 
 function rhythmCheck(sim, p) {
-  const a = p.afe, r = erng(p);
+  const a = p.crisis, r = erng(p);
   if (a.phase !== 'arrest') return;
   a.cycles++;
   const t = sim.t, el = (t - a.arrestT) / MIN;
@@ -301,6 +323,10 @@ function rhythmCheck(sim, p) {
   let pr = 0.05 + (epiRecent ? 0.06 : 0) + (pregnant ? (a.lud ? 0 : -0.04) : 0.2) + (teamHere(sim, a) ? 0.04 : 0) + (a.intubated ? 0.03 : 0);
   if (a.rhythm === 'VF') pr += a.shocked ? 0.18 : -0.03;
   if (a.rhythm === 'asystole') pr -= 0.03;
+  if (a.cause === 'mag') {
+    const ca = sim.lastDose(p, 'calcium');
+    pr += (ca && ca.t >= a.arrestT ? 0.25 : -0.03) + (p.meds.mag.on ? -0.05 : 0.03);
+  }
   pr = clamp(pr / a.sev * (el > 20 ? 0.5 : 1), 0.01, 0.6);
   a.shocked = false;
   if (r.chance(pr)) { rosc(sim, p); return; }
@@ -313,7 +339,7 @@ function rhythmCheck(sim, p) {
 }
 
 function rosc(sim, p) {
-  const a = p.afe;
+  const a = p.crisis;
   a.phase = 'rosc'; a.roscT = sim.t;
   sim.logTruth(p, `ROSC after ${mmss(sim.t - a.arrestT)}`);
   releaseAnes(sim, p);
@@ -325,7 +351,7 @@ function rosc(sim, p) {
 }
 
 function death(sim, p) {
-  const a = p.afe;
+  const a = p.crisis;
   a.phase = 'dead'; a.deathT = sim.t;
   p.flags.maternalDeath = sim.t;
   releaseAnes(sim, p);
@@ -338,7 +364,7 @@ function death(sim, p) {
 }
 
 export function hysterotomy(sim, p) {
-  const a = p.afe;
+  const a = p.crisis;
   a.hystT = sim.t;
   const dur = Math.round(erng(p).range(...(p.area === 'or' ? [30, 60] : [60, 110])));
   sim.mdSays(p, `Scalpel. Vertical skin incision, through the uterus — ${p.area === 'or' ? 'she\'s already prepped' : 'right there on the bed, compressions still going'}.`, 3);
