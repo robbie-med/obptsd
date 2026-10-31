@@ -189,7 +189,7 @@ function finishShoulder(sim, p, tr) {
 // the game at all; "black cloud" multiplies again. Onset: sudden hypoxia, hypotension, arrest, DIC.
 export const AFE_PER_LABOR_HOUR = 9e-5;  // laboring with ruptured membranes (~2.6 h per birth on this floor)
 export const AFE_AT_DELIVERY = 2.5e-4;   // onset within ~20 min of birth (x2 for cesarean)
-export const CRISIS_LABEL = { afe: 'AFE', mag: 'Magnesium arrest' };
+export const CRISIS_LABEL = { afe: 'AFE', mag: 'Magnesium arrest', hem: 'Hemorrhagic arrest' };
 
 export function codeActions(p) {
   const A = (label, text) => ({ label, cmd: { type: 'order', pid: p.id, text } });
@@ -197,7 +197,8 @@ export function codeActions(p) {
   const mag = p.crisis && p.crisis.cause === 'mag';
   return [...(mag ? [A('Calcium gluconate 1 g', 'calcium gluconate 1 g IV'), A('Stop mag', 'stop mag')] : []), A('Epi 1 mg IV', 'epinephrine 1 mg IV'),
     ...(pregnant ? [A('Left uterine displacement', 'LUD'), A('Resuscitative hysterotomy', 'resuscitative hysterotomy')] : []),
-    A('Shock', 'defibrillate'), A('Intubate', 'intubate'), ...(mag ? [] : [A('MTP', 'massive transfusion')])];
+    A('Shock', 'defibrillate'), A('Intubate', 'intubate'), ...(mag ? [] : [A('MTP', 'massive transfusion')]),
+    ...(p.crisis && p.crisis.cause === 'hem' && p.T.pp ? [A('Back to the OR', 'return to OR')] : [])];
 }
 
 function newCrisis(sim, p, cause, o) {
@@ -251,6 +252,24 @@ export function startMagArrest(sim, p) {
   sim.logTruth(p, `MAGNESIUM ARREST (Mg ${p.T.mg.toFixed(1)} mg/dL)`);
   arrest(sim, p);
 }
+
+// Exsanguination [CMQCC-OBH]: past ~40-50% of a pregnant blood volume without replacement the heart stops
+// in PEA. Only volume and a stopped source bring her back; epi and shocks on an empty tank mostly don't.
+export function startHemArrest(sim, p) {
+  if (p.status === 'gone' || !['ldr', 'triage', 'or', 'pacu', 'waiting'].includes(p.area)) return;
+  if (p.crisis && ['prodrome', 'collapse', 'arrest', 'dead'].includes(p.crisis.phase)) return;
+  const r = erng(p);
+  const again = p.crisis && p.crisis.cause === 'hem';
+  newCrisis(sim, p, 'hem', { phase: 'collapse', sev: 1, willArrest: true, rhythm: r.chance(0.8) ? 'PEA' : 'asystole' });
+  p.crisis.collapseT = sim.t;
+  p.crisis.volAtArrest = hemDeficit(p);
+  p.crisis.transfusedAtArrest = p.T.pp ? p.T.pp.transfused : 0;
+  p.T.hemArrests = (p.T.hemArrests || 0) + 1;
+  sim.logTruth(p, `${again ? 'RE-ARREST' : 'HEMORRHAGIC ARREST'} (uncorrected blood loss ~${Math.round(hemDeficit(p) / 100) * 100} mL)`);
+  sim.page(p, `${p.name.split(' ')[0]} is gray and won't answer me — I can't feel a radial pulse!`, 3, codeActions(p));
+  sim.after(Math.round(r.range(30, 90)), () => arrest(sim, p));
+}
+export function hemDeficit(p) { const T = p.T; return (T.pp ? T.pp.qbl - T.pp.transfused : 0) + T.qblAntepartum; }
 
 function arrest(sim, p) {
   const a = p.crisis, r = erng(p);
@@ -326,6 +345,16 @@ function rhythmCheck(sim, p) {
   if (a.cause === 'mag') {
     const ca = sim.lastDose(p, 'calcium');
     pr += (ca && ca.t >= a.arrestT ? 0.25 : -0.03) + (p.meds.mag.on ? -0.05 : 0.03);
+  }
+  if (a.cause === 'hem') {
+    // an empty heart: the delivery bonus doesn't apply, only volume and a stopped source do, and each
+    // re-arrest is harder to come back from
+    const pp = p.T.pp;
+    const given = (pp ? pp.transfused : 0) - (a.transfusedAtArrest || 0);
+    const stillPouring = pp && pp.bleed > 30 && !pp.returnOR && !pp.hyst;
+    pr = 0.02 + (epiRecent ? 0.02 : 0) + (teamHere(sim, a) ? 0.02 : 0) + (pregnant && !a.lud ? -0.01 : 0)
+      + (given >= 1400 ? 0.3 : given >= 700 ? 0.14 : 0) + (stillPouring ? -0.01 : 0.04);
+    pr *= Math.pow(0.5, (p.T.hemArrests || 1) - 1);
   }
   pr = clamp(pr / a.sev * (el > 20 ? 0.5 : 1), 0.01, 0.6);
   a.shocked = false;

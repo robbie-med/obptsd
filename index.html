@@ -25,6 +25,7 @@
       <label class="toggle" title="Show the hidden truth (teaching mode)"><input type="checkbox" id="teach"> truth</label>
       <label class="toggle" title="Drop to 1× when something urgent happens"><input type="checkbox" id="autoslow" checked> auto-slow</label>
       <label class="toggle" title="Sound for urgent pages"><input type="checkbox" id="sound"> sound</label>
+      <label class="toggle" title="Hear the room: the Doppler at whatever rate the monitor is printing, plus the monitor and pumps when you walk in"><input type="checkbox" id="fhrAudio"> ♥ room audio</label>
       <button id="endBtn" class="ghost" title="End the shift now and see the debrief">End shift</button>
       <button id="menuBtn" class="ghost">Menu</button>
     </div>
@@ -57,20 +58,27 @@
         </div>
         <div id="orderPreview"></div>
         <div id="quick"></div>
+        <div id="bedsideLog" title="What you see and hear on the floor (not on the phone)"></div>
       </div>
       <div id="chartTabs" class="tabs"></div>
       <div id="chart"></div>
     </section>
     <aside id="comms">
-      <div class="commsHead">
-        <span>Pages &amp; calls</span>
-        <span class="filters">
-          <button data-filter="all" class="on">All</button>
-          <button data-filter="pt">This pt</button>
-          <button data-filter="urgent">Urgent</button>
-        </span>
+      <div class="phone">
+        <div class="phoneTop"><span>HospNet ▂▄▆</span><span id="phoneClock"></span><span>🔋23%</span>
+          <button id="phoneToggle" class="ghost small" title="Put the phone in your pocket (P)">▾</button></div>
+        <div id="phoneMini" title="Take out your phone (P)">📱<span id="phoneBadge" class="badge hidden"></span><div id="phoneMiniFrom"></div></div>
+        <div class="commsHead">
+          <span>SecureChat<sup>™</sup></span>
+          <span class="filters">
+            <button data-filter="all" class="on">All</button>
+            <button data-filter="pt">This pt</button>
+            <button data-filter="urgent">Urgent</button>
+          </span>
+        </div>
+        <div id="login" class="hidden"></div>
+        <div id="feed"></div>
       </div>
-      <div id="feed"></div>
     </aside>
   </main>
   <div id="banner" class="hidden"></div>

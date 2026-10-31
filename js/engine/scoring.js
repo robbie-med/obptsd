@@ -82,6 +82,8 @@ export function computeScore(sim) {
       if ((p.gbsTrue === 'pos' || p.gbs === 'unknown') && o.mode !== 'cs' && !p.gbsAdequate) add(p, 3, 'GBS prophylaxis inadequate (<4 h before delivery)');
       if (p.flags.iolStartT != null) row.iolToDelivery = (o.t - p.flags.iolStartT) / H;
     }
+    // a baby that dies in utero and is never delivered on your shift is still a stillbirth on your shift
+    if (!o && T.demise && !(p.crisis && p.crisis.deathT != null)) add(p, 40, `Intrauterine fetal death (${p.area === 'home' ? 'at home' : p.area === 'waiting' ? 'in the waiting room' : 'undelivered'})`);
     if (T.infect > 1) add(p, 4, 'Intraamniotic infection (Triple I)');
     if (T.eclampsiaCount) add(p, 15 * T.eclampsiaCount, `Eclampsia${p.meds.mag.on ? '' : ' (not on magnesium)'}`);
     if (T.stroke) add(p, 30, 'Stroke (sustained severe-range BP)');
@@ -105,10 +107,11 @@ export function computeScore(sim) {
       if (w > 60 && !p.flags.natural) add(p, 1, `Waited ${w.toFixed(0)} min for an epidural`);
     }
     if (p.bounced) add(p, 6, 'Returned to triage after discharge');
+    for (const c of p.flags.chain || []) add(p, 5, `Charge nurse called the backup OB over your head (${c.what})`);
     if (p.area === 'home' && !o && p.phoneAdvice !== 'come in') {
       if (T.laborOnset && T.dil >= 5) add(p, 4, 'Sent home / kept home in active labor');
       if (T.peSev > 0.7) add(p, 5, 'Severe preeclampsia sent home');
-      if (T.bd > 10 || T.demise) add(p, 15, 'Compromised fetus at home');
+      if (T.bd > 10 && !T.demise) add(p, 15, 'Compromised fetus at home');
     }
     if (p.flags.rescheduled) row.events.push('Induction rescheduled');
     const sd = p.sd;
@@ -140,6 +143,7 @@ export function computeScore(sim) {
         const epiLate = a.firstEpiT == null ? (a.roscT ?? a.deathT ?? sim.t) - a.arrestT > 5 * MIN : a.firstEpiT - a.arrestT > 5 * MIN;
         if (epiLate) add(p, 3, 'No IV epinephrine in the first 5 minutes of the arrest');
         if (a.badShock) add(p, 2, 'Shocked a non-shockable rhythm');
+        if (a.cause === 'hem') add(p, 20, 'Cardiac arrest from hemorrhage');
         if (a.cause === 'mag' && (a.firstCaT == null || a.firstCaT - a.arrestT > 5 * MIN)) add(p, 5, 'No calcium gluconate in the first 5 minutes of a magnesium arrest');
       }
       if (a.deathT != null) add(p, 30, a.cause === 'afe' ? 'Maternal death (AFE kills even with perfect care)' : 'Maternal death');

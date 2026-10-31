@@ -496,6 +496,15 @@ function maternalStep(p, sim, E, t, dt) {
   if (dx.hellp) { T.plt = Math.max(18, T.plt - 5 * dt / H); T.ast += 6 * dt / H; }
   if (dx.preE === 'severe') T.cr += 0.01 * dt / H;
   if (T.abr > 0 && !T.pp) T.qblAntepartum += (T.abr * 3) * dt / 60;
+  // exsanguination: each woman has her own tolerance (~45-65% of a ~7 L pregnant blood volume, unreplaced)
+  const lost = (T.pp ? T.pp.qbl - T.pp.transfused : 0) + T.qblAntepartum;
+  if (lost > 2500) {
+    if (T.hemTol == null) T.hemTol = T.rng.fork('hemtol').range(3300, 4600);
+    const a = p.crisis;
+    const busy = a && ['prodrome', 'collapse', 'arrest', 'dead'].includes(a.phase);
+    const reArrest = a && a.cause === 'hem' ? lost > (a.volAtArrest || 0) + 900 : true;
+    if (lost > T.hemTol && !busy && reArrest) sim.emit(p, 'hem_arrest');
+  }
 
   if (p.crisis) afeStep(p, sim, E, t, dt);
 
@@ -662,7 +671,10 @@ function hazardStep(p, sim, E, t, dt) {
   } else if (!T.rupture && E.oxyIM > 0.5 && r.chance(0.0004 * dt)) { T.rupture = true; sim.emit(p, 'rupture'); }
   // eclampsia [ACOG-PB222]: Mg >= 4.8 mg/dL roughly halves risk
   if (dx.preE !== 'none' || dx.gHTN) {
-    let h = 0.0004 * (T.peSev > 0.7 ? 3 : 0.6) * (T.sbp >= 160 ? 2.5 : 1) * (T.mgEff >= 4.8 ? 0.4 : 1);
+    // untreated severe-range hours and a prior seizure without magnesium both stack the odds
+    const neglect = 1 + 0.8 * T.severeBpSec / H;
+    const recur = T.eclampsiaCount && T.mgEff < 4.8 ? 8 : 1;
+    let h = 0.0004 * (T.peSev > 0.7 ? 3 : 0.6) * (T.sbp >= 160 ? 2.5 : 1) * (T.mgEff >= 4.8 ? 0.4 : 1) * neglect * recur;
     if (t > T.seizingUntil + 600 && r.chance(h * dt / H)) {
       T.seizingUntil = t + r.range(60, 100); T.eclampsiaCount++; sim.emit(p, 'eclampsia');
     }
@@ -670,7 +682,7 @@ function hazardStep(p, sim, E, t, dt) {
   // severe-range BP exposure and stroke
   if (T.sbp >= 160 || T.dbp >= 110) {
     T.severeBpSec += dt;
-    if (T.severeBpSec > 3600 && r.chance(0.0015 * (T.sbp >= 180 ? 4 : 1) * dt / H) && !T.stroke) { T.stroke = true; sim.emit(p, 'stroke'); }
+    if (T.severeBpSec > 3600 && r.chance(0.002 * (T.severeBpSec / H) * (T.sbp >= 180 ? 4 : 1) * dt / H) && !T.stroke) { T.stroke = true; sim.emit(p, 'stroke'); }
   } else T.severeBpSec = Math.max(0, T.severeBpSec - dt * 0.5);
   // mag toxicity milestones
   if (T.mgEff >= 12 && !T.flagMgResp) { T.flagMgResp = true; sim.emit(p, 'mag_resp'); }
@@ -776,6 +788,7 @@ export function startPostpartum(p, sim, mode, extra = {}) {
 
 function postpartumStep(p, sim, E, t, dt) {
   const T = p.T, pp = T.pp;
+  if (p.crisis && p.crisis.phase === 'dead') { pp.bleed = 0; return; }
   const s = t - pp.t0;
   let target = pp.toneBase + (p.meds.ppOxy ? 0.18 : 0) + 0.2 * Math.min(1, E.meth) + 0.2 * Math.min(1, E.hema) + 0.13 * Math.min(1, E.misoPP)
     + 0.15 * Math.min(1, E.oxyIM) + (t - pp.massage < 300 ? 0.1 : 0) + (pp.bakri ? 0.35 : 0) + (pp.returnOR ? 0.5 : 0);
@@ -786,13 +799,14 @@ function postpartumStep(p, sim, E, t, dt) {
   if (T.fib < 200 || pp.qbl > 2000) bleed *= 1.3;
   if (T.fib < 150) bleed *= 1 + (150 - T.fib) / 60; // consumptive coagulopathy: nothing clots
   if (E.txa > 0.2) bleed *= 0.78;
+  if (p.crisis && p.crisis.phase === 'arrest') bleed *= 0.25; // no pressure behind it
   if (pp.hyst) bleed = 0.5;
   pp.bleed = bleed;
   pp.qbl += bleed * dt / 60;
   T.hgb = Math.max(3, T.hgb - (bleed * dt / 60) / 500 * 0.5 * 2 + (pp.lastTransfuse && t - pp.lastTransfuse < 1800 ? 0.0006 * dt : 0));
   if (pp.qbl > 1500) T.fib = Math.max(80, T.fib - 0.02 * bleed * dt / 60);
   if (pp.qbl >= 1000 && !pp.flagPPH) { pp.flagPPH = true; sim.emit(p, 'pph'); }
-  if (pp.qbl - pp.transfused > 3800 && !pp.flagShock) { pp.flagShock = true; sim.emit(p, 'shock'); }
+  if (pp.qbl - pp.transfused > 2600 && !pp.flagShock) { pp.flagShock = true; sim.emit(p, 'shock'); }
 }
 
 export function sampleHistory(p, t) {

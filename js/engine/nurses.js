@@ -90,8 +90,8 @@ export function nurseTick(sim, nurse, p) {
     if (ns.lostCount >= 3) {
       ns.lastLostReq = t; ns.lostCount = 0;
       const canFse = p.chart.romKnown;
-      sim.page(p, `I keep losing the heart rate on ${p.name.split(' ')[0]}. ${canFse ? 'Can I put a scalp lead on?' : 'She\'s intact so I can\'t do a scalp lead.'}`, 1,
-        canFse ? [{ label: 'FSE', cmd: { type: 'order', pid: p.id, text: 'FSE' } }] : [], nurse);
+      escalate(sim, nurse, p, 'lost', 'tracing dropping out', `I keep losing the heart rate on ${p.name.split(' ')[0]}. ${canFse ? 'Can I put a scalp lead on?' : 'She\'s intact so I can\'t do a scalp lead.'}`, 1,
+        canFse ? [{ label: 'FSE', cmd: { type: 'order', pid: p.id, text: 'FSE' } }] : [{ label: 'Bedside US', cmd: { type: 'order', pid: p.id, text: 'bedside US' } }]);
     }
   }
 
@@ -106,8 +106,8 @@ export function nurseTick(sim, nurse, p) {
       sim.setPit(p, nr, 'nurse');
       sim.page(p, `She's contracting ${rd.ctxPer10.toFixed(0)} in 10 — I turned the pit down to ${nr}.`, 1, [], nurse);
     } else if (r.chance(0.5)) {
-      sim.page(p, `She's contracting about ${rd.ctxPer10.toFixed(0)} in 10 on pit ${pit.rate}. Want me to do anything?`, 1,
-        [{ label: 'Pit down', cmd: { type: 'order', pid: p.id, text: 'pit down' } }, { label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }, { label: 'Terb', cmd: { type: 'order', pid: p.id, text: 'terbutaline 0.25 mg SQ' } }], nurse);
+      escalate(sim, nurse, p, 'tachy', 'tachysystole', `She's contracting about ${rd.ctxPer10.toFixed(0)} in 10 on pit ${pit.rate}. Want me to do anything?`, 1,
+        [{ label: 'Pit down', cmd: { type: 'order', pid: p.id, text: 'pit down' } }, { label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }, { label: 'Terb', cmd: { type: 'order', pid: p.id, text: 'terbutaline 0.25 mg SQ' } }]);
     }
   }
   // Cervidil out for tachysystole / 12 h
@@ -165,15 +165,21 @@ function tracingWatch(sim, nurse, p, ns, rd) {
   if ((prolonged || brady) && rd.mhrMatchFrac > 0.7 && r.chance(0.35 + 0.6 * nurse.knowledge)) {
     // the FHR line is sitting on top of mom's pulse: she fixes the transducer instead of calling
     p.mon.us = 'ok'; p.mon.usUntil = t;
-    if (r.chance(nurse.chatty)) sim.nurseSays(p, `Heart rate dropped out — the US was picking up mom's pulse. Repositioned the transducer.`, 0);
+    // the third time in 20 minutes the "baby" is mom's pulse, she stops fixing the transducer and calls
+    ns.mhrFixes = (ns.mhrFixes || []).filter(x => t - x < 20 * MIN); ns.mhrFixes.push(t);
+    if (ns.mhrFixes.length >= 3) {
+      ns.mhrFixes = [];
+      escalate(sim, nurse, p, 'lost', 'missing fetal heart tones', `I can't find the baby's heartbeat on ${first} — every time I move the toco I'm getting mom's pulse. Can you come scan her?`, 3,
+        [{ label: 'Bedside US', cmd: { type: 'order', pid: p.id, text: 'bedside US' } }, ...(p.chart.romKnown ? [{ label: 'FSE', cmd: { type: 'order', pid: p.id, text: 'FSE' } }] : [])]);
+    } else if (ns.mhrFixes.length === 1 && t - (ns.mhrSaidT ?? -1e9) > 60 * MIN && r.chance(nurse.chatty)) { ns.mhrSaidT = t; sim.nurseSays(p, `Heart rate dropped out — the US was picking up mom's pulse. Repositioned the transducer.`, 0); }
     return;
   }
   const ongoing = rd.currentFhr != null && rd.currentFhr < 110;
   if (prolonged && !ongoing && !brady) {
     if (t - (ns.lastRecoveredPage || -1e9) > 20 * MIN && r.chance(0.3 + 0.7 * nurse.alert)) {
       ns.lastRecoveredPage = t;
-      sim.page(p, `She had a decel down to the ${Math.floor(Math.max(40, rd.baseline - prolonged.depth) / 10) * 10}s for about ${Math.max(1, Math.round(prolonged.dur / 60))} min — back to baseline now. I repositioned her.`, 2,
-        [{ label: 'SVE (you)', cmd: { type: 'mdExam', pid: p.id } }, { label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }], nurse);
+      escalate(sim, nurse, p, 'decel', 'decels', `She had a decel down to the ${Math.floor(Math.max(40, rd.baseline - prolonged.depth) / 10) * 10}s for about ${Math.max(1, Math.round(prolonged.dur / 60))} min — back to baseline now. I repositioned her.`, 2,
+        [{ label: 'SVE (you)', cmd: { type: 'mdExam', pid: p.id } }, { label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }]);
       sim.reposition(p, true);
     }
     return;
@@ -181,9 +187,9 @@ function tracingWatch(sim, nurse, p, ns, rd) {
   if ((prolonged || brady) && t - ns.lastTracingPage > 8 * MIN) {
     ns.lastTracingPage = t;
     const hr = Math.round(rd.currentFhr ?? rd.minFhr);
-    sim.page(p, `${first}'s baby is down in the ${Math.floor(hr / 10) * 10}s${prolonged ? ` for ${Math.round(prolonged.dur / 60 * 10) / 10} min` : ''}! I'm ${resusText(nurse)}.`, 3,
+    escalate(sim, nurse, p, 'fhr', 'fetal bradycardia', `${first}'s baby is down in the ${Math.floor(hr / 10) * 10}s${prolonged ? ` for ${Math.round(prolonged.dur / 60 * 10) / 10} min` : ''}! I'm ${resusText(nurse)}.`, 3,
       [{ label: 'C-section STAT', cmd: { type: 'order', pid: p.id, text: 'c-section stat for prolonged decel' } },
-       { label: 'SVE (you)', cmd: { type: 'mdExam', pid: p.id } }, { label: 'Terb', cmd: { type: 'order', pid: p.id, text: 'terbutaline 0.25 mg SQ' } }], nurse);
+       { label: 'SVE (you)', cmd: { type: 'mdExam', pid: p.id } }, { label: 'Terb', cmd: { type: 'order', pid: p.id, text: 'terbutaline 0.25 mg SQ' } }]);
     intrauterineResus(sim, nurse, p);
     return;
   }
@@ -193,27 +199,27 @@ function tracingWatch(sim, nurse, p, ns, rd) {
     ns.lastLatePage = t;
     const mis = r.chance((1 - nurse.knowledge) * 0.6);
     const what = mis ? r.pick(['some variables', 'a couple of decels, maybe early', 'some dips with contractions']) : 'decels after her contractions — they look late to me';
-    sim.page(p, `Room ${p.room.replace('LDR ', '')}: she's having ${what}. Baseline ${Math.round(rd.baseline / 5) * 5}.`, 2,
-      [{ label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }, { label: 'Reposition', cmd: { type: 'order', pid: p.id, text: 'reposition' } }, { label: 'Bolus', cmd: { type: 'order', pid: p.id, text: 'LR bolus 500' } }], nurse);
+    escalate(sim, nurse, p, 'lates', 'decels', `Room ${p.room.replace('LDR ', '')}: she's having ${what}. Baseline ${Math.round(rd.baseline / 5) * 5}.`, 2,
+      [{ label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }, { label: 'Reposition', cmd: { type: 'order', pid: p.id, text: 'reposition' } }, { label: 'Bolus', cmd: { type: 'order', pid: p.id, text: 'LR bolus 500' } }]);
     if (nurse.pit === 'cautious' && p.meds.pit.rate > 0) { sim.setPit(p, Math.floor(p.meds.pit.rate / 2), 'nurse'); sim.nurseSays(p, `I cut her pit in half.`, 1); }
     sim.reposition(p, true);
   } else if (vars >= 3 && t - ns.lastVarPage > 40 * MIN && r.chance(nurse.alert * 0.8)) {
     ns.lastVarPage = t;
-    sim.page(p, `She's having recurrent variables, some down ${Math.round(Math.max(...rd.decels.map(d => d.depth)) / 10) * 10} beats.`, 2,
-      [{ label: 'Reposition', cmd: { type: 'order', pid: p.id, text: 'reposition' } }, { label: 'Amnioinfusion', cmd: { type: 'order', pid: p.id, text: 'amnioinfusion' } }], nurse);
+    escalate(sim, nurse, p, 'vars', 'variables', `She's having recurrent variables, some down ${Math.round(Math.max(...rd.decels.map(d => d.depth)) / 10) * 10} beats.`, 2,
+      [{ label: 'Reposition', cmd: { type: 'order', pid: p.id, text: 'reposition' } }, { label: 'Amnioinfusion', cmd: { type: 'order', pid: p.id, text: 'amnioinfusion' } }]);
     sim.reposition(p, true);
   }
   if (rd.variability != null && rd.variability <= 5 && rd.accels.length === 0) {
     ns.flatSince = ns.flatSince ?? t;
     if (t - ns.flatSince > 35 * MIN && t - ns.lastFlatPage > 60 * MIN && r.chance(nurse.alert * 0.7)) {
       ns.lastFlatPage = t;
-      sim.page(p, `Her variability has looked minimal for a while${rd.decels.length ? ', with some decels' : ''}.`, 2,
-        [{ label: 'Scalp stim', cmd: { type: 'order', pid: p.id, text: 'VAS' } }], nurse);
+      escalate(sim, nurse, p, 'flat', 'minimal variability', `Her variability has looked minimal for a while${rd.decels.length ? ', with some decels' : ''}.`, 2,
+        [{ label: 'Scalp stim', cmd: { type: 'order', pid: p.id, text: 'VAS' } }, { label: 'SVE (you)', cmd: { type: 'mdExam', pid: p.id } }]);
     }
   } else ns.flatSince = null;
   if (rd.baseline > 165 && t - ns.lastTachyPage > 60 * MIN && r.chance(nurse.alert * 0.6)) {
     ns.lastTachyPage = t;
-    sim.page(p, `Baby's baseline is up around ${Math.round(rd.baseline / 5) * 5}.`, 1, [{ label: 'Vitals', cmd: { type: 'order', pid: p.id, text: 'vitals' } }], nurse);
+    escalate(sim, nurse, p, 'fhrtachy', 'fetal tachycardia', `Baby's baseline is up around ${Math.round(rd.baseline / 5) * 5}.`, 1, [{ label: 'Vitals', cmd: { type: 'order', pid: p.id, text: 'vitals' } }]);
   }
   // maternal pickup: a sharp nurse notices the FHR tracking the MHR line
   if (p.mon.us === 'mhr' && r.chance(nurse.alert * 0.15)) {
@@ -284,12 +290,65 @@ function postpartumNursing(sim, nurse, p, ns) {
       const urgent = q >= 1000 || pp.bleed > 40;
       if (nurse.knowledge > 0.4) pp.massage = t;
       if (!p.meds.ppOxy) p.meds.ppOxy = true;
-      sim.page(p, `${p.name.split(' ')[0]} is bleeding — QBL ${q} mL, fundus ${pp.tone > 0.6 ? 'firms up then relaxes' : 'boggy'}. ${pp.bleed > 30 ? 'It\'s pouring.' : ''}`, urgent ? 3 : 2, [
+      escalate(sim, nurse, p, 'bleed', 'bleeding', `${p.name.split(' ')[0]} is bleeding — QBL ${q} mL, fundus ${pp.tone > 0.6 ? 'firms up then relaxes' : 'boggy'}. ${pp.bleed > 30 ? 'It\'s pouring.' : ''}`, urgent ? 3 : 2, [
         { label: 'TXA 1 g', cmd: { type: 'order', pid: p.id, text: 'TXA 1 g IV' } },
         { label: 'Methergine', cmd: { type: 'order', pid: p.id, text: 'methergine 0.2 mg IM' } },
         { label: 'Hemabate', cmd: { type: 'order', pid: p.id, text: 'hemabate 250 mcg IM' } },
         { label: 'Miso 800 PR', cmd: { type: 'order', pid: p.id, text: 'miso 800 mcg PR' } },
-      ], nurse);
+        ...(q >= 1500 ? [{ label: 'Transfuse 2u', cmd: { type: 'order', pid: p.id, text: 'transfuse 2 units' } }] : []),
+      ]);
     }
   }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Chain of command. A nurse whose page goes unanswered doesn't repeat herself word for word: she calls
+// again in her own voice, then asks you to come to the bedside, then her charge nurse calls you, then
+// the charge nurse calls the backup OB in over your head. Any order, exam or answer you give for the
+// patient counts as a response and starts the ladder over.
+const AGAIN = {
+  veteran: ['Calling back about {first}. ', 'Second call on {first}. '],
+  worrier: ['Sorry to bother you again — ', 'I\'m still really worried about {first}. '],
+  newgrad: ['Um, sorry, me again about {first}… ', 'I didn\'t hear back, so — '],
+  optimist: ['Just following up — ', 'Me again on {first}. '],
+  traveler: ['Following up on {room}. ', 'Paging again about {first}. '],
+  pitpusher: ['Second page. ', 'Still waiting to hear from you about {first}. '],
+  steady: ['Following up on {first}. ', 'Calling again — '],
+};
+const COME = {
+  veteran: ['I need you to put eyes on her. Now.', 'This is my third call. Come to the room.'],
+  worrier: ['Please — can you come see her? I don\'t like this.', 'I really think you need to come look at her.'],
+  newgrad: ['I don\'t know what else to do. Can you come?', 'Should I be getting the charge nurse?'],
+  optimist: ['I think you should come take a look.', 'Can you swing by when you get a sec? Soon?'],
+  traveler: ['Where I worked last there\'d be a doc in here by now. Can you come?', 'I need a bedside eval.'],
+  pitpusher: ['Third call. I need an order or I need you here.', 'Come see her.'],
+  steady: ['I need you to come to the bedside.', 'Third time calling — please come see her.'],
+};
+
+export function escalate(sim, nurse, p, key, what, text, prio = 1, actions = []) {
+  const st = p.esc || (p.esc = {});
+  const e = st[key] || (st[key] = { n: 0, lastT: -1e9, quietUntil: -1e9 });
+  if ((p.flags.mdT ?? -1e9) > e.lastT) { e.n = 0; e.quietUntil = -1e9; }
+  e.n++; e.lastT = sim.t;
+  if (!nurse) return sim.page(p, text, prio, actions, nurse);
+  const r = sim.nrng, first = p.name.split(' ')[0];
+  const fill = (s) => s.replace('{first}', first).replace('{room}', p.room || 'triage');
+  const voice = (tbl) => fill(r.pick(tbl[nurse.arch] || tbl.steady));
+  if (e.n === 1) return sim.page(p, text, prio, actions, nurse);
+  if (e.n === 2) return sim.page(p, voice(AGAIN) + text, prio, actions, nurse);
+  if (e.n === 3) return sim.page(p, `${text} ${voice(COME)}`, Math.min(3, prio + 1), actions, nurse);
+  if (e.n === 4) {
+    sim.logTruth(p, `Charge RN escalated: ${what}`);
+    return sim.charge(`${nurse.name} has paged you three times about ${first}'s ${what} (${p.room || 'triage'}) and hasn't heard back. Are you coming? If I don't hear from you I'm calling the backup OB.`, 3,
+      [{ label: 'Going now (exam her)', cmd: { type: 'mdExam', pid: p.id } }, ...actions], p);
+  }
+  if (e.n === 5 && !e.backup) {
+    e.backup = true; e.quietUntil = sim.t + 30 * MIN;
+    sim.backupOB(p, key, what);
+    return null;
+  }
+  // past the top of the ladder she keeps calling, but not every few minutes
+  if (sim.t < e.quietUntil) return null;
+  e.quietUntil = sim.t + 30 * MIN;
+  return sim.page(p, `${text} Still no answer from you.`, Math.min(3, prio + 1), actions, nurse);
 }

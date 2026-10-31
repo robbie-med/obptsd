@@ -233,6 +233,54 @@ console.log('magnesium arrest');
   check('calcium + stop mag beats doing nothing', roscCa > roscNone + 3, `ROSC ${roscCa}/12 vs ${roscNone}/12`);
 }
 
+console.log('hemorrhagic arrest');
+{
+  let arrests = 0, deathsIdle = 0, survResp = 0, survIdle = 0;
+  for (let i = 0; i < 10; i++) {
+    for (const respond of [true, false]) {
+      const sim = new Sim({ seed: 'hem' + i, mode: 'single' });
+      const p = sim.patients[0];
+      sim.run(600);
+      sim.deliver(p, 'vaginal');
+      if (p.sd) { sim.run(15 * 60); }
+      p.T.pp.toneBase = 0.12; p.T.pp.atony = true; // she will not clamp down on her own
+      // responding = the hemorrhage protocol when she crosses 1 L, then MTP and the OR at 2 L
+      const steps = [[1000, ['methergine 0.2 mg IM', 'TXA 1 g IV', 'transfuse 2 units']], [1800, ['hemabate 250 mcg IM', 'massive transfusion', 'return to OR']]];
+      for (let k = 0; k < 6 * 60 && !(p.crisis && p.crisis.phase === 'dead'); k++) {
+        sim.run(60);
+        while (respond && steps.length && p.T.pp.qbl >= steps[0][0]) for (const t of steps.shift()[1]) sim.command({ type: 'order', pid: p.id, text: t });
+      }
+      if (!respond && p.crisis && p.crisis.cause === 'hem') arrests++;
+      const dead = p.crisis && p.crisis.deathT != null;
+      if (!respond && dead) deathsIdle++;
+      if (!dead) respond ? survResp++ : survIdle++;
+    }
+  }
+  check('unchecked postpartum hemorrhage ends in cardiac arrest', arrests >= 9, `${arrests}/10 arrested`);
+  check('untreated exsanguination can kill', deathsIdle >= 5, `${deathsIdle}/10 maternal deaths with no response`);
+  check('running the hemorrhage protocol saves her', survResp >= 7 && survResp > survIdle + 4, `survived ${survResp}/10 vs ${survIdle}/10`);
+}
+
+console.log('nurse chain of command');
+{
+  let maxRep = 0, worst = '', charge = 0, backup = 0, fetalDeathScored = 0, fetalDeaths = 0;
+  for (const seed of ['cc1', 'cc2', 'cc3', 'cc4']) {
+    const sim = new Sim({ seed, mode: 'night' });
+    sim.run(12 * H); // nobody answers anything
+    const cnt = {};
+    for (const m of sim.msgs) {
+      if (m.role === 'charge' && /paged you three times/.test(m.text)) charge++;
+      if (m.role === 'nurse') { const k = m.pid + '|' + m.text.replace(/\d+/g, '#'); cnt[k] = (cnt[k] || 0) + 1; if (cnt[k] > maxRep) { maxRep = cnt[k]; worst = k; } }
+    }
+    backup += sim.patients.reduce((a, p) => a + ((p.flags.chain || []).length), 0);
+    const sc = computeScore(sim);
+    for (const p of sim.patients) if (!p.outcome && p.T.demise) { fetalDeaths++; if (sc.pen.some(x => x.pid === p.id && /fetal death/i.test(x.text))) fetalDeathScored++; }
+  }
+  check('ignored nurses escalate instead of looping', maxRep <= 8, `worst repeat ${maxRep}× (${worst.slice(0, 70)})`);
+  check('charge nurse goes up the chain when pages go unanswered', charge >= 2 && backup >= 2, `${charge} charge calls, ${backup} backup-OB visits over 4 idle nights`);
+  check('undelivered fetal deaths are scored', fetalDeathScored === fetalDeaths, `${fetalDeathScored}/${fetalDeaths}`);
+}
+
 console.log('black cloud');
 {
   let sd = 0, afe = 0;

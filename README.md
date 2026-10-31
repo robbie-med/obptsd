@@ -47,6 +47,29 @@ paging you.
 - **Magnesium arrest**: Mg toxicity that gets as far as cardiac arrest runs through the same code (asystole or PEA).
   Calcium gluconate and stopping the infusion are what bring her back; epi alone mostly doesn't.
 
+- **Hemorrhagic arrest**: every woman has her own hidden tolerance for unreplaced blood loss (~3.3–4.6 L). Past it
+  she arrests (mostly PEA) through the same code. Epi and shocks do little on an empty heart; blood and a stopped
+  source (back to the OR) are what bring her back, and each re-arrest is harder. Untreated, she dies.
+
+## Your phone and the chain of command
+
+Pages arrive on **SecureChat** (right; **P** pockets the phone). It logs you out about every 30 game minutes "for
+hospital security purposes" (IS-114, rev. 1998): you see *who* is paging, not what, until you log in, which spins for
+1–3 real seconds while the floor keeps going, and once or twice a night tells you that you forgot your password.
+Bedside findings and overhead pages stay off the phone (under the order box). The phone is UI only; it never
+touches the sim, so replays are exact.
+
+**♥ room audio** (header toggle): when you open a patient you hear her room — the monitor chirp, the pump's triple
+beep if Pit or magnesium is running, the vitals alarm if her last charted vitals are out of range — and then the
+Doppler, synthesized beat by beat at whatever rate the paper is printing. Decels slow it, a lost signal is static,
+and a transducer on mom's pulse sounds like mom's rate. It reads only what the monitor shows, never the truth.
+
+A nurse whose page goes unanswered doesn't repeat herself: she calls again in her own voice, then asks you to come to
+the bedside, then the charge nurse calls you, then the charge nurse brings in the backup OB over your head (−5 each,
+and the backup OB takes 12–28 min to get there). Anything you do for that patient resets the ladder. Nurses also do
+what's in their scope without you: they hold magnesium for absent reflexes or RR < 12, put on O₂ for a low sat,
+massage and run oxytocin for bleeding, and stop "fixing the transducer" and call when they can't find heart tones.
+
 Scoring judges the response, not the bad luck: head-to-body interval, traction, arrest-to-delivery (> 5 min), LUD, and
 epinephrine in the first 5 min, calcium in the first 5 min of a magnesium arrest. Rates and maneuver success are cited in `data.js`.
 

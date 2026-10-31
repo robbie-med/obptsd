@@ -7,10 +7,10 @@ import { stepPatient, quietStep, sampleHistory, neonatalOutcome, startPostpartum
 import { analyzeStrip, annotate } from './monitor.js';
 import { parseOrder } from './orders.js';
 import { HANDLERS } from './drugs.js';
-import { makeNurse, nurseExam, nurseTick, sveString } from './nurses.js';
+import { makeNurse, nurseExam, nurseTick, sveString, escalate } from './nurses.js';
 import { setupScenario } from './scenario.js';
 import { resetPatientIds } from './patient.js';
-import { maybeShoulderDystocia, startAFE, startMagArrest, realtimeEmergency, erng, AFE_AT_DELIVERY } from './emergency.js';
+import { maybeShoulderDystocia, startAFE, startMagArrest, startHemArrest, realtimeEmergency, erng, AFE_AT_DELIVERY } from './emergency.js';
 
 const MIN = 60, H = 3600;
 export const START_CLOCK = 19 * H;
@@ -27,6 +27,7 @@ export class Sim {
     this.rng = new Rng(this.seed);
     this.nrng = this.rng.fork('nurses');
     this.orng = this.rng.fork('orders');
+    this.brng = this.rng.fork('backup-ob'); // only moves when you ignore your pages: can't shift the chaos timeline
     this.lrng = this.rng.fork('labs');
     this.crng = this.rng.fork('chaos');
     this.t = 0;
@@ -176,6 +177,7 @@ export class Sim {
       if (this.replayLog) return { ok: false, msg: 'Replay in progress — input disabled.' };
       this.cmdLog.push({ t: this.t, cmd });
     }
+    this.markResponse(cmd);
     switch (cmd.type) {
       case 'order': return this.placeOrder(cmd.pid, cmd.text);
       case 'confirm': return this.confirmOrder(cmd.oid, cmd.level);
@@ -193,6 +195,53 @@ export class Sim {
       case 'endShift': this.endT = this.t + 1; return { ok: true };
       default: return { ok: false, msg: 'Unknown command' };
     }
+  }
+
+  // anything you do for a patient counts as answering her nurse (nurses.js escalate)
+  markResponse(cmd) {
+    let pid = cmd.pid;
+    if (cmd.oid != null) { const [, op] = this.findOrder(cmd.oid); if (op) pid = op.id; }
+    if (cmd.mid != null) { const m = this.msgs.find(x => x.id === cmd.mid); if (m) pid = m.pid; }
+    const p = pid != null ? this.byId[pid] : null;
+    if (p) p.flags.mdT = this.t;
+  }
+
+  // Chain of command, top rung: the backup OB comes to see a patient you didn't answer about and does
+  // the obvious thing. It won't be fast, and it goes in the record.
+  backupOB(p, key, what) {
+    const first = p.name.split(' ')[0];
+    const doc = 'Dr. Osei';
+    const askedT = this.t;
+    (p.flags.chain || (p.flags.chain = [])).push({ t: this.t, key, what });
+    this.logTruth(p, `Backup OB called over your head: ${what}`);
+    this.charge(`I couldn't reach you, so I called ${doc} (backup OB) to see ${first} about her ${what}. Chain of command — it's going in my note.`, 2, [], p);
+    this.after(Math.round(this.brng.range(12, 28)) * MIN, () => {
+      if (p.status === 'gone' || (p.crisis && p.crisis.phase === 'dead')) return;
+      if ((p.flags.mdT ?? -1e9) > askedT) { this.charge(`${doc} came by for ${first}, saw you'd put orders in, and left.`, 0, [], p); return; }
+      const T = p.T, rd = p.read;
+      const plan = {
+        bp: ['labetalol 20 mg IV'], mag: ['stop mag', 'calcium gluconate 1 g IV'], sat: ['O2', 'vitals'], fever: ['ampicillin 2 g IV q6h', 'gentamicin 5 mg/kg IV q24h'],
+        bleed: [p.dx.preE !== 'none' || p.dx.cHTN || p.dx.gHTN ? 'hemabate 250 mcg IM' : 'methergine 0.2 mg IM', 'TXA 1 g IV', ...(T.pp && T.pp.qbl > 1500 ? ['transfuse 2 units'] : [])],
+        fhr: !p.outcome && rd && rd.currentFhr != null && rd.currentFhr < 110 ? ['c-section stat for prolonged decel'] : ['pit off'],
+        lates: ['pit off', 'LR bolus 500'], decel: ['pit off'], vars: ['amnioinfusion'], flat: ['pit off'], tachy: ['pit off', 'terbutaline 0.25 mg SQ'],
+        fhrtachy: ['vitals', 'acetaminophen 1 g PO'], lost: [p.chart.romKnown ? 'FSE' : 'bedside US'],
+      }[key] || ['vitals'];
+      const done = [];
+      for (const text of plan) if (this.internalOrder(p, text)) done.push(text);
+      this.msg(`${doc} (backup OB)`, 'attending', p, `Saw ${first}. ${done.length ? 'Ordered: ' + done.join(', ') + '.' : 'Nothing more to add right now.'} ${this.brng.pick(['Call me if you need me — and answer your pages.', 'Your nurse was right to call.', 'She needed someone at the bedside an hour ago.', 'I\'ll document. Come find me after.'])}`, 2);
+    });
+  }
+  // an order placed by someone other than you (backup OB): no pushback, no pharmacy call, not in your command log
+  internalOrder(p, text) {
+    const o = parseOrder(text);
+    const h = o.ok && HANDLERS[o.id];
+    if (!h) return false;
+    const prep = h.prepare(o, p, this);
+    if (!prep.ok || prep.issues.some(i => i.hard)) return false;
+    const order = { id: this.nextOrderId++, pid: p.id, t: this.t, text, label: prep.label + ' (backup OB)', status: 'new', prep, issues: [], parsedId: o.id, urgency: o.urgency, byBackup: true };
+    p.chart.orders.push(order);
+    this.executeOrder(order);
+    return true;
   }
 
   placeOrder(pid, text) {
@@ -390,14 +439,14 @@ export class Sim {
         ns.severePending = null;
         if (this.t - (ns.lastBpPage || -1e9) > 12 * MIN) {
           ns.lastBpPage = this.t;
-          this.page(p, `BP ${v.sbp}/${v.dbp}${confirm ? ' on repeat' : ''}. ${p.flags.treatedT ? '' : 'She hasn\'t had anything for it.'}${T.peSev > 0.8 && this.nrng.chance(0.5) ? ' She says she has a headache.' : ''}`, 2,
+          escalate(this, n, p, 'bp', 'blood pressure', `BP ${v.sbp}/${v.dbp}${confirm ? ' on repeat' : ''}. ${p.flags.treatedT ? '' : 'She hasn\'t had anything for it.'}${T.peSev > 0.8 && this.nrng.chance(0.5) ? ' She says she has a headache.' : ''}`, 2,
             [{ label: 'Labetalol 20 IV', cmd: { type: 'order', pid: p.id, text: 'labetalol 20 mg IV' } }, { label: 'Hydralazine 5 IV', cmd: { type: 'order', pid: p.id, text: 'hydralazine 5 mg IV' } }, { label: 'Nifedipine 10 PO', cmd: { type: 'order', pid: p.id, text: 'nifedipine 10 mg PO' } }]);
         }
       } else if (!ns.severePending) ns.severePending = this.t + 15 * MIN;
     } else if (ns.severePending && this.t >= ns.severePending) ns.severePending = null;
     if (v.temp >= 38 && this.t - (ns.lastFeverPage || -1e9) > 2 * H) {
       ns.lastFeverPage = this.t;
-      this.page(p, `Temp ${v.temp}, maternal HR ${v.hr}.`, v.temp >= 39 ? 3 : 2,
+      escalate(this, n, p, 'fever', 'fever', `Temp ${v.temp}, maternal HR ${v.hr}.`, v.temp >= 39 ? 3 : 2,
         [{ label: 'Amp + gent', cmd: { type: 'order', pid: p.id, text: 'ampicillin 2 g IV q6h' }, cmd2: { type: 'order', pid: p.id, text: 'gentamicin 5 mg/kg IV q24h' } },
          { label: 'Gent 5 mg/kg', cmd: { type: 'order', pid: p.id, text: 'gentamicin 5 mg/kg IV q24h' } },
          { label: 'Tylenol 1 g', cmd: { type: 'order', pid: p.id, text: 'acetaminophen 1 g PO' } }]);
@@ -405,14 +454,19 @@ export class Sim {
     if (v.reflex === 'absent' || v.rr < 12) {
       if (this.t - (ns.lastMagPage || -1e9) > 10 * MIN) {
         ns.lastMagPage = this.t;
-        this.page(p, `${v.reflex === 'absent' ? 'I can\'t get any patellar reflexes' : ''}${v.rr < 12 ? (v.reflex === 'absent' ? ' and her' : 'Her') + ` resp rate is ${v.rr}` : ''}.`, 3,
+        const wasOn = p.meds.mag.on;
+        if (wasOn && n) { this.stopMag(p); this.note(p, 'Mag held by RN (toxicity)'); }
+        const held = wasOn && n ? ' I stopped the mag per protocol.' : !p.meds.mag.on && p.meds.mag.startT != null ? ' Mag is already off.' : '';
+        escalate(this, n, p, 'mag', 'magnesium toxicity', `${v.reflex === 'absent' ? 'I can\'t get any patellar reflexes' : ''}${v.rr < 12 ? (v.reflex === 'absent' ? ' and her' : 'Her') + ` resp rate is ${v.rr}` : ''}.${held}`, 3,
           [{ label: 'Stop mag', cmd: { type: 'order', pid: p.id, text: 'stop mag' } }, { label: 'Calcium gluconate 1 g', cmd: { type: 'order', pid: p.id, text: 'calcium gluconate 1 g IV' } }, { label: 'Mag level', cmd: { type: 'order', pid: p.id, text: 'mag level' } }]);
       }
     }
     if (v.spo2 < 93 && this.t - (ns.lastSatPage || -1e9) > 10 * MIN) {
       ns.lastSatPage = this.t;
-      this.page(p, `Her sat is ${v.spo2}% ${T.pulmEdema > 0.3 ? '— she sounds wet, crackles at the bases' : ''}.`, 3,
-        [{ label: 'O2', cmd: { type: 'order', pid: p.id, text: 'O2' } }]);
+      const o2 = !p.meds.o2 && n; if (o2) p.meds.o2 = true;
+      const why = T.pulmEdema > 0.3 ? ' She sounds wet — crackles at the bases.' : T.pp && T.pp.qbl > 1500 ? ` She's pale and clammy.` : T.mgEff > 9 ? ' She\'s very drowsy.' : '';
+      escalate(this, n, p, 'sat', 'oxygen saturation', `Her sat is ${v.spo2}%${o2 ? ' — I put her on a non-rebreather' : p.meds.o2 ? ' on oxygen' : ''}.${why}`, 3,
+        [{ label: 'Vitals', cmd: { type: 'order', pid: p.id, text: 'vitals' } }, { label: 'Exam her', cmd: { type: 'mdExam', pid: p.id } }]);
     }
     if (ordered) this.page(p, `Vitals: BP ${v.sbp}/${v.dbp}, HR ${v.hr}, T ${v.temp}, RR ${v.rr}, sat ${v.spo2}%${v.reflex ? `, reflexes ${v.reflex}` : ''}.`, 0);
     return v;
@@ -1023,6 +1077,10 @@ export class Sim {
         return;
       case 'mag_arrest':
         startMagArrest(this, p);
+        return;
+      case 'hem_arrest':
+        if (p.area === 'home' || p.area === 'offsite') return;
+        startHemArrest(this, p);
         return;
       case 'foley_out':
         if (offFloor) return;

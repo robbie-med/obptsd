@@ -1,5 +1,6 @@
 // UI shell. Reads sim state for display and sends player input only through sim.command(),
 // so every night is replayable from (seed, command log).
+import { enterRoom, dopplerTick, stopAll as stopSound } from './sound.js';
 import { Sim } from '../engine/sim.js';
 import { parseOrder, describeParsed, ORDER_HINTS } from '../engine/orders.js';
 import { sveString } from '../engine/nurses.js';
@@ -18,6 +19,7 @@ const ui = {
   sim: null, selId: null, speed: 0, view: { window: 'paper', live: true, endT: 0, teaching: false },
   tab: 'overview', filter: 'all', msgNodes: new Map(), lastMsgCount: 0, skipFromMsg: 0, lastUrgentSeen: -1,
   lastRender: 0, carry: 0, replay: false, acted: new Set(), audio: null, ended: false, history: [], lastAlarm: 0,
+  phone: null,
 };
 
 // ------------------------------------------------------------------------ boot / menu
@@ -51,7 +53,7 @@ function showMenu(first = false) {
     </div>
     <h2>How to play</h2>
     <div class="help">
-      <p><b>Select a patient</b> on the board (left). Her strip, vitals and chart are in the middle; pages from nurses, pharmacy, lab and anesthesia land on the right.</p>
+      <p><b>Select a patient</b> on the board (left). Her strip, vitals and chart are in the middle; pages from nurses, pharmacy, lab and anesthesia land on your phone (right; <b>P</b> pockets it). SecureChat logs you out about every half hour for hospital security purposes — you'll see who is paging, but you have to log in to read it.</p>
       <p><b>Write orders in free text</b>: <code>pit per protocol</code>, <code>pit up 2</code>, <code>pit off</code>, <code>miso 25 mcg PV q4h</code>, <code>cervidil</code>, <code>foley bulb</code>, <code>AROM</code>, <code>mag 4 g IV load then 2 g/h</code>, <code>labetalol 20 mg IV</code>, <code>PCN G 5 MU IV then 2.5 MU q4h</code>, <code>terbutaline 0.25 mg SQ</code>, <code>epidural</code>, <code>c-section stat for prolonged decel</code>, <code>TXA 1 g IV</code>.</p>
       <p><b>Wrong orders</b> get nurse pushback, a pharmacy callback — or they quietly go through and hurt someone, depending on who's on.</p>
       <p><b>Nurses are people.</b> Each has a persistent bias and noise on exams, her own Pit style, and her own threshold for calling you. Two exams 20 minutes apart can disagree. Examine her yourself when it matters (it takes time).</p>
@@ -92,7 +94,8 @@ function newGame({ mode, seed, teaching = false, replay = null, blackCloud = fal
   ui.replay = !!replay;
   if (replay) ui.sim.loadReplay(replay);
   ui.view.teaching = teaching; $('#teach').checked = teaching;
-  ui.selId = null; ui.msgNodes.clear(); $('#feed').innerHTML = ''; ui.acted.clear();
+  ui.selId = null; ui.msgNodes.clear(); $('#feed').innerHTML = ''; $('#bedsideLog').innerHTML = ''; ui.acted.clear();
+  phoneReset(); stopSound();
   ui.ended = false; ui.lastUrgentSeen = -1; ui.view.live = true;
   ui.sim.on((type, m) => {
     if (type === 'msg') onMsg(m);
@@ -140,6 +143,7 @@ function frame(now) {
       if (fast() && s.realtimeEmergency()) { setSpeed(1); break; }
     }
   }
+  if (s) dopplerTick(s, s.byId[ui.selId], $('#fhrAudio').checked && !ui.ended && !!ui.speed);
   if (s && !ui.ended && ui.speed && now - ui.lastAlarm > 2000 && s.realtimeEmergency()) { ui.lastAlarm = now; alarm(); }
   if (s) {
     const p = s.byId[ui.selId];
@@ -151,11 +155,12 @@ function frame(now) {
 
 // ------------------------------------------------------------------------ messages
 function onMsg(m) {
+  if (!isPhoneMsg(m)) { bedsideLine(m); if (m.prio >= 3) { banner(m); beep(2); } return; }
   const node = msgNode(m);
   $('#feed').prepend(node);
   ui.msgNodes.set(m.id, node);
   applyFilter(node, m);
-  if (m.pid && m.pid === ui.selId) m.read = true;
+  if (m.pid && m.pid === ui.selId && !phoneLocked() && ui.phone.open) m.read = true;
   if (m.prio >= 3) {
     const ep = m.pid && ui.sim.byId[m.pid];
     if (!(ep && realtimeEmergency(ep))) banner(m); // the emergency bar is already shouting about her
@@ -164,15 +169,15 @@ function onMsg(m) {
 }
 function msgNode(m) {
   const d = document.createElement('div');
-  d.className = `msg p${m.prio} role-${m.role}${m.read ? '' : ' unread'}`;
+  d.className = `msg p${m.prio} role-${m.role} secure${m.read ? '' : ' unread'}`;
   const s = ui.sim;
-  d.innerHTML = `<div class="mh"><span class="from">${esc(m.from)}</span>${m.room ? `<span class="rm" data-pid="${m.pid}">${esc(m.room)}</span>` : ''}<span class="time">${s.clock(m.t)}</span></div>
+  d.innerHTML = `<div class="mh"><span class="lockline">🔒 Alert from ${esc(m.from.replace(/,.*$/, ''))}</span><span class="from">${esc(m.from)}</span>${m.room ? `<span class="rm" data-pid="${m.pid}">${esc(m.room)}</span>` : ''}<span class="time">${s.clock(m.t)}</span></div>
     <div class="mt">${esc(m.text)}</div>
     ${m.actions && m.actions.length ? `<div class="ma">${m.actions.map((a, i) => `<button data-i="${i}">${esc(a.label)}</button>`).join('')}</div>` : ''}`;
   d.querySelectorAll('.ma button').forEach(b => b.onclick = (e) => {
     e.stopPropagation();
     const a = m.actions[+b.dataset.i];
-    if (ui.replay) return;
+    if (ui.replay || phoneLocked()) return;
     if (a.cmd.type === 'mdExam') { const r = ui.sim.command(a.cmd); feedback(r); }
     else { const r = ui.sim.command(a.cmd); if (a.cmd2) ui.sim.command(a.cmd2); if (a.cmd.type === 'order') feedback(r); }
     b.disabled = true;
@@ -180,7 +185,7 @@ function msgNode(m) {
   });
   const rm = d.querySelector('.rm');
   if (rm) rm.onclick = (e) => { e.stopPropagation(); select(m.pid); };
-  d.onclick = () => { m.read = true; d.classList.remove('unread'); if (m.pid) select(m.pid); };
+  d.onclick = () => { if (phoneLocked()) return; m.read = true; d.classList.remove('unread'); if (m.pid) select(m.pid); };
   return d;
 }
 function applyFilter(node, m) {
@@ -201,9 +206,9 @@ function refreshFeed() {
 let bannerTimer = null;
 function banner(m) {
   const b = $('#banner');
-  b.textContent = `${m.room ? m.room + ' — ' : ''}${m.text}`;
+  b.textContent = isPhoneMsg(m) && phoneLocked() ? `🔒 SecureChat: alert from ${m.from} — log in to read` : `${m.room ? m.room + ' — ' : ''}${m.text}`;
   b.classList.remove('hidden');
-  b.onclick = () => { if (m.pid) select(m.pid); b.classList.add('hidden'); };
+  b.onclick = () => { if (m.pid && !(isPhoneMsg(m) && phoneLocked())) select(m.pid); b.classList.add('hidden'); };
   clearTimeout(bannerTimer);
   bannerTimer = setTimeout(() => b.classList.add('hidden'), 8000);
 }
@@ -236,18 +241,93 @@ function alarm() {
   } catch { /* no audio */ }
 }
 
+// ------------------------------------------------------------------------ the hospital phone
+// Pages arrive on SecureChat, which logs you out about every half hour of game time "for hospital security
+// purposes". Locked, you see who is paging but not what they want. UI only: nothing here touches the sim,
+// so replays are unaffected (the spinner runs on wall-clock time while the floor keeps going).
+const PHONE_ROLES = new Set(['nurse', 'charge', 'pharmacy', 'anesthesia', 'attending', 'lab', 'phone', 'family']);
+function isPhoneMsg(m) { return PHONE_ROLES.has(m.role); }
+function phoneLocked() { return !ui.phone || ui.phone.state !== 'in'; }
+function phoneReset() {
+  const fails = new Set();
+  const nFail = Math.random() < 0.5 ? 1 : 2;
+  while (fails.size < nFail) fails.add(2 + Math.floor(Math.random() * 14)); // somewhere in the night's 2nd-15th login
+  ui.phone = { open: ui.phone ? ui.phone.open : true, state: 'out', attempts: 0, fails, nextLogoutT: Infinity, why: 'start', err: '' };
+  renderLogin();
+}
+function phoneTick() {
+  const ph = ui.phone, s = ui.sim;
+  if (!ph || !s || ph.state !== 'in' || s.t < ph.nextLogoutT) return;
+  ph.state = 'out'; ph.why = 'timeout'; ph.err = '';
+  renderLogin();
+}
+function phoneLogin() {
+  const ph = ui.phone;
+  if (ph.state !== 'out') return;
+  ph.state = 'spin'; ph.attempts++; ph.err = '';
+  renderLogin();
+  setTimeout(() => {
+    if (ui.phone !== ph) return;
+    if (ph.fails.has(ph.attempts)) { ph.fails.delete(ph.attempts); ph.state = 'out'; ph.err = 'You forgot your password. Try again.'; renderLogin(); return; }
+    ph.state = 'in';
+    const s = ui.sim;
+    ph.nextLogoutT = s.t + Math.round((20 + Math.random() * 20) * 60);
+    renderLogin(); refreshFeed(); renderPhone();
+  }, 1000 + Math.random() * 2000);
+}
+function renderLogin() {
+  const el = $('#login'), ph = ui.phone;
+  if (!el || !ph) return;
+  $('.phone').classList.toggle('locked', ph.state !== 'in');
+  if (ph.state === 'in') { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  if (ph.state === 'spin') { el.innerHTML = `<div class="lt">SecureChat™</div><div class="spinner"></div><div class="small">Authenticating with Active Directory…</div>`; return; }
+  el.innerHTML = `<div class="lt">SecureChat™</div>
+    ${ph.err ? `<div class="err">${esc(ph.err)}</div>` : ph.why === 'timeout' ? `<div>You were logged out for hospital security purposes.</div>
+      <div class="small">Per Information Security Policy IS-114 (rev. 03/1998), sessions expire every 30 minutes whether or not they are in use.</div>` : `<div class="small">Sign in to view secure messages.</div>`}
+    <button id="loginBtn">Log in</button>`;
+  $('#loginBtn').onclick = phoneLogin;
+}
+function phoneUnread() {
+  let n = 0, last = null;
+  for (const m of ui.sim.msgs) if (isPhoneMsg(m) && !m.read && m.prio >= 1) { n++; last = m; }
+  return [n, last];
+}
+function renderPhone() {
+  const s = ui.sim, ph = ui.phone; if (!s || !ph) return;
+  $('#main').classList.toggle('pocket', !ph.open);
+  $('#phoneClock').textContent = s.clock();
+  const [n, last] = phoneUnread();
+  const b = $('#phoneBadge');
+  b.textContent = n > 99 ? '99+' : n; b.classList.toggle('hidden', !n);
+  $('#phoneMiniFrom').textContent = last ? (phoneLocked() ? 'Alert from ' + last.from.replace(/,.*$/, '') : last.from.replace(/,.*$/, '') + ': ' + last.text.slice(0, 60)) : '';
+}
+function togglePhone() { ui.phone.open = !ui.phone.open; renderPhone(); }
+function bedsideLine(m) {
+  const el = $('#bedsideLog'); if (!el) return;
+  const d = document.createElement('div');
+  d.className = `${m.role === 'md' ? 'md' : ''} p${m.prio}`;
+  d.title = m.text;
+  d.innerHTML = `<span class="t">${ui.sim.clock(m.t)}</span>${m.room ? `<b>${esc(m.room)}</b> ` : ''}${esc(m.text)}`;
+  if (m.pid) { d.style.cursor = 'pointer'; d.onclick = () => select(m.pid); }
+  el.prepend(d);
+  while (el.children.length > 5) el.lastChild.remove();
+}
+
 // ------------------------------------------------------------------------ selection & rendering
 function select(pid) {
+  const entering = pid !== ui.selId;
   ui.selId = pid;
+  if (entering && $('#fhrAudio').checked && ui.sim && ui.sim.byId[pid]) enterRoom(ui.sim, ui.sim.byId[pid]);
   const s = ui.sim;
-  for (const m of s.msgs) if (m.pid === pid) m.read = true;
+  if (!phoneLocked()) for (const m of s.msgs) if (m.pid === pid) m.read = true;
   ui.view.live = true;
   renderAll();
 }
 
 function renderAll() {
   const s = ui.sim; if (!s) return;
-  renderTop(); renderEmerg(); renderBoard(); renderPatient(); refreshFeed();
+  phoneTick(); renderTop(); renderEmerg(); renderBoard(); renderPatient(); refreshFeed(); renderPhone();
 }
 
 // Everything here is what the team in the room knows: clocks, what's been tried, the last rhythm
@@ -638,6 +718,8 @@ function wire() {
     document.querySelectorAll('.filters button').forEach(x => x.classList.toggle('on', x === b));
     refreshFeed();
   });
+  $('#phoneToggle').onclick = togglePhone;
+  $('#phoneMini').onclick = togglePhone;
   $('#stripWindow').onchange = (e) => { ui.view.window = e.target.value === 'paper' ? 'paper' : +e.target.value; };
   $('#liveBtn').onclick = () => { ui.view.live = true; };
   // scrub the strip: drag or wheel
@@ -665,6 +747,7 @@ function wire() {
     else if (e.key === '1') setSpeed(1); else if (e.key === '2') setSpeed(10); else if (e.key === '3') setSpeed(60); else if (e.key === '4') setSpeed(240);
     else if (e.key === 'n' || e.key === 'N') setSpeed('skip');
     else if (e.key === '/') { e.preventDefault(); $('#orderInput').focus(); }
+    else if (e.key === 'p' || e.key === 'P') togglePhone();
     else if ((e.key === 'e' || e.key === 'E') && ui.selId) feedback(ui.sim.command({ type: 'mdExam', pid: ui.selId }));
     else if (e.key === '[' || e.key === ']') {
       const list = [...document.querySelectorAll('#board .card[data-pid]')].map(c => c.dataset.pid);
