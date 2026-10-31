@@ -235,3 +235,14 @@ input:focus, select:focus { outline: none; border-color: var(--green); }
 #bedsideLog .t { font-family: var(--mono); margin-right: 6px; }
 #bedsideLog .md { color: #cfe3ff; }
 #bedsideLog .p2, #bedsideLog .p3 { color: #ffc98a; }
+
+/* ---- floor map */
+#floorWrap { margin-bottom: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.floorHead { display: flex; gap: 10px; align-items: center; padding: 4px 8px; font-size: 12px; color: var(--muted); }
+.floorHead b { color: var(--text); }
+#meStatus { color: #dfe8f1; font-family: var(--mono); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.legendDots { margin-left: auto; font-size: 10.5px; white-space: nowrap; }
+.legendDots i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 3px 0 8px; vertical-align: middle; }
+#floorToggle { padding: 0 6px; }
+#floor { display: block; width: 100%; height: 210px; cursor: pointer; }
+#floorWrap.collapsed #floor, #floorWrap.collapsed .legendDots { display: none; }

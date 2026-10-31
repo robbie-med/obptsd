@@ -116,7 +116,7 @@ export function queueMove(sim, p, key, by = 'md') {
   if (pending.length >= 3) return { ok: false, msg: 'Three maneuvers are already lined up.' };
   const r = erng(p);
   let start = Math.max(sim.t, sd.busyUntil);
-  if (by === 'md' && !sd.mdHere) { sd.mdHere = true; start += 20; } // you have to get into the room
+  if (by === 'md' && !sd.mdHere) { sd.mdHere = true; start += sim.floor ? Math.max(5, Math.round(sim.floor.mdEta(p))) : 20; } // you have to get into the room
   const helped = sd.helpT != null && start >= sd.helpT;
   const extra = key === 'gaskin' && p.epidural.state === 'working' ? 45 : 0; // flipping a numb woman
   const dur = Math.round((M.dur + extra) * (helped ? 0.8 : 1) * r.range(0.85, 1.25));

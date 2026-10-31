@@ -1,6 +1,7 @@
 // UI shell. Reads sim state for display and sends player input only through sim.command(),
 // so every night is replayable from (seed, command log).
 import { enterRoom, dopplerTick, stopAll as stopSound } from './sound.js';
+import { drawFloor, roomAt, setHover } from './floormap.js';
 import { Sim } from '../engine/sim.js';
 import { parseOrder, describeParsed, ORDER_HINTS } from '../engine/orders.js';
 import { sveString } from '../engine/nurses.js';
@@ -143,11 +144,21 @@ function frame(now) {
       if (fast() && s.realtimeEmergency()) { setSpeed(1); break; }
     }
   }
-  if (s) dopplerTick(s, s.byId[ui.selId], $('#fhrAudio').checked && !ui.ended && !!ui.speed);
+  if (s && s.floor) {
+    // the room you walk into chirps at you; you hear the Doppler of the room you're standing in,
+    // or (quietly, from the central monitor) the patient you have selected
+    const md = s.floor.md;
+    const here = !md.path.length ? s.patients.find(q => q.status !== 'gone' && q.room === md.at && q.area !== 'or') : null;
+    const audio = $('#fhrAudio').checked && !ui.ended;
+    if (here && ui.lastRoom !== md.at && audio) enterRoom(s, here);
+    ui.lastRoom = md.path.length ? null : md.at;
+    dopplerTick(s, here || s.byId[ui.selId], audio && !!ui.speed, here ? 1 : 0.3);
+  }
   if (s && !ui.ended && ui.speed && now - ui.lastAlarm > 2000 && s.realtimeEmergency()) { ui.lastAlarm = now; alarm(); }
   if (s) {
     const p = s.byId[ui.selId];
     if (p) drawStrip($('#strip'), s, p, ui.view);
+    if (!$('#floorWrap').classList.contains('collapsed')) drawFloor($('#floor'), s, ui, ui.speed && ui.speed !== 'skip' && ui.speed <= 10 ? clamp(ui.carry, 0, 1) : 1);
     if (now - ui.lastRender > 250) { ui.lastRender = now; renderAll(); }
   }
   requestAnimationFrame(frame);
@@ -302,6 +313,13 @@ function renderPhone() {
   b.textContent = n > 99 ? '99+' : n; b.classList.toggle('hidden', !n);
   $('#phoneMiniFrom').textContent = last ? (phoneLocked() ? 'Alert from ' + last.from.replace(/,.*$/, '') : last.from.replace(/,.*$/, '') + ': ' + last.text.slice(0, 60)) : '';
 }
+function renderMe() {
+  const md = ui.sim.floor && ui.sim.floor.md; if (!md) return;
+  const where = md.path.length ? `walking → ${md.dest}` : `in ${md.at}`;
+  const todo = md.queue.length ? ` · then ${md.queue.length} more` : '';
+  $('#meStatus').textContent = `You: ${md.task && !md.path.length ? md.doing : where}${todo}`;
+}
+function toggleFloor() { $('#floorWrap').classList.toggle('collapsed'); }
 function togglePhone() { ui.phone.open = !ui.phone.open; renderPhone(); }
 function bedsideLine(m) {
   const el = $('#bedsideLog'); if (!el) return;
@@ -316,9 +334,8 @@ function bedsideLine(m) {
 
 // ------------------------------------------------------------------------ selection & rendering
 function select(pid) {
-  const entering = pid !== ui.selId;
   ui.selId = pid;
-  if (entering && $('#fhrAudio').checked && ui.sim && ui.sim.byId[pid]) enterRoom(ui.sim, ui.sim.byId[pid]);
+
   const s = ui.sim;
   if (!phoneLocked()) for (const m of s.msgs) if (m.pid === pid) m.read = true;
   ui.view.live = true;
@@ -327,7 +344,7 @@ function select(pid) {
 
 function renderAll() {
   const s = ui.sim; if (!s) return;
-  phoneTick(); renderTop(); renderEmerg(); renderBoard(); renderPatient(); refreshFeed(); renderPhone();
+  phoneTick(); renderTop(); renderEmerg(); renderBoard(); renderPatient(); refreshFeed(); renderPhone(); renderMe();
 }
 
 // Everything here is what the team in the room knows: clocks, what's been tried, the last rhythm
@@ -719,6 +736,19 @@ function wire() {
     refreshFeed();
   });
   $('#phoneToggle').onclick = togglePhone;
+  $('#floorToggle').onclick = toggleFloor;
+  const fl = $('#floor');
+  fl.addEventListener('mousemove', (e) => { const r = fl.getBoundingClientRect(); setHover({ x: e.clientX - r.left, y: e.clientY - r.top }); });
+  fl.addEventListener('mouseleave', () => setHover(null));
+  fl.addEventListener('mousedown', (e) => {
+    if (!ui.sim || ui.replay) return;
+    const r = fl.getBoundingClientRect();
+    const place = roomAt(fl, e.clientX - r.left, e.clientY - r.top);
+    if (!place) return;
+    feedback(ui.sim.command({ type: 'walk', place, run: e.shiftKey }));
+    const p = ui.sim.patients.find(q => q.status !== 'gone' && (q.room === place || (place === 'Waiting' && q.area === 'waiting')));
+    if (p) select(p.id);
+  });
   $('#phoneMini').onclick = togglePhone;
   $('#stripWindow').onchange = (e) => { ui.view.window = e.target.value === 'paper' ? 'paper' : +e.target.value; };
   $('#liveBtn').onclick = () => { ui.view.live = true; };
@@ -748,6 +778,7 @@ function wire() {
     else if (e.key === 'n' || e.key === 'N') setSpeed('skip');
     else if (e.key === '/') { e.preventDefault(); $('#orderInput').focus(); }
     else if (e.key === 'p' || e.key === 'P') togglePhone();
+    else if (e.key === 'm' || e.key === 'M') toggleFloor();
     else if ((e.key === 'e' || e.key === 'E') && ui.selId) feedback(ui.sim.command({ type: 'mdExam', pid: ui.selId }));
     else if (e.key === '[' || e.key === ']') {
       const list = [...document.querySelectorAll('#board .card[data-pid]')].map(c => c.dataset.pid);

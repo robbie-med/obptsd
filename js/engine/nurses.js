@@ -67,7 +67,7 @@ export function nurseTick(sim, nurse, p) {
     lastBpPage: -1e9, severePending: null, lastPushUpdate: -1e9, lastBleedPage: -1e9, resusT: -1e9, lostCount: 0, lastLostReq: -1e9 });
   const t = sim.t, T = p.T, r = sim.nrng;
   if (p.area === 'or' || p.area === 'offsite' || p.area === 'home' || p.status === 'gone') return;
-  if ((p.sd && p.sd.active) || (p.crisis && ['collapse', 'arrest'].includes(p.crisis.phase))) return; // everyone's hands are busy
+  if ((p.sd && p.sd.active) || (p.crisis && ['collapse', 'arrest', 'dead'].includes(p.crisis.phase))) return; // everyone's hands are busy
 
   // ---- vitals
   const dx = p.dx;
@@ -77,7 +77,7 @@ export function nurseTick(sim, nurse, p) {
   if (T.pp && t - T.pp.t0 < 2 * H) vInt = 15 * MIN;
   if (p.area === 'triage') vInt = 30 * MIN;
   if (ns.severePending && t >= ns.severePending) vInt = 0;
-  if (t - ns.lastVitalsT >= vInt) sim.takeVitals(p, false);
+  if (t - ns.lastVitalsT >= vInt) sim.floor.bedside(nurse, p, 'vitals', ns.severePending && t >= ns.severePending ? 5 : 3, 60, 'vitals', () => sim.takeVitals(p, false));
 
   if (T.pp) { postpartumNursing(sim, nurse, p, ns); return; }
 
@@ -97,14 +97,18 @@ export function nurseTick(sim, nurse, p) {
 
   // ---- pit titration per protocol
   const pit = p.meds.pit;
-  if (pit.protocol && pit.rate > 0 && rd) pitTitrate(sim, nurse, p, ns, rd);
+  if (pit.protocol && pit.rate > 0 && rd && t - pit.lastTitrT >= pit.protocol.intervalMin * MIN) sim.floor.bedside(nurse, p, 'titrate', 3, 40, 'pit check', () => p.read && p.meds.pit.protocol && pitTitrate(sim, nurse, p, p.ns, p.read));
   // tachysystole response even without a protocol
   if (pit.rate > 0 && rd && rd.ctxPer10 != null && rd.ctxPer10 > 5.4 && t - (ns.lastTachyAct || -1e9) > 20 * MIN) {
     ns.lastTachyAct = t;
     if (nurse.pit === 'cautious' || (nurse.pit === 'standard' && r.chance(0.7))) {
-      const nr = nurse.pit === 'cautious' ? Math.floor(pit.rate / 2) : Math.max(0, pit.rate - (pit.protocol?.inc || 2));
-      sim.setPit(p, nr, 'nurse');
-      sim.page(p, `She's contracting ${rd.ctxPer10.toFixed(0)} in 10 — I turned the pit down to ${nr}.`, 1, [], nurse);
+      const c10 = rd.ctxPer10;
+      sim.floor.bedside(nurse, p, 'tachy', 6, 30, 'turning pit down', () => {
+        if (!p.meds.pit.rate) return;
+        const nr = nurse.pit === 'cautious' ? Math.floor(p.meds.pit.rate / 2) : Math.max(0, p.meds.pit.rate - (p.meds.pit.protocol?.inc || 2));
+        sim.setPit(p, nr, 'nurse');
+        sim.page(p, `She's contracting ${c10.toFixed(0)} in 10 — I turned the pit down to ${nr}.`, 1, [], nurse);
+      });
     } else if (r.chance(0.5)) {
       escalate(sim, nurse, p, 'tachy', 'tachysystole', `She's contracting about ${rd.ctxPer10.toFixed(0)} in 10 on pit ${pit.rate}. Want me to do anything?`, 1,
         [{ label: 'Pit down', cmd: { type: 'order', pid: p.id, text: 'pit down' } }, { label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }, { label: 'Terb', cmd: { type: 'order', pid: p.id, text: 'terbutaline 0.25 mg SQ' } }]);
@@ -112,8 +116,8 @@ export function nurseTick(sim, nurse, p) {
   }
   // Cervidil out for tachysystole / 12 h
   if (p.meds.cervidil.in) {
-    if (t - p.meds.cervidil.inT >= 12 * H) { sim.removeCervidil(p, '12 h'); sim.page(p, `Cervidil is out — it's been 12 hours.`, 1, [], nurse); }
-    else if (rd && rd.ctxPer10 != null && rd.ctxPer10 > 5 && nurse.pit !== 'aggressive') { sim.removeCervidil(p, 'tachysystole'); sim.page(p, `Pulled her Cervidil — she was contracting ${rd.ctxPer10.toFixed(0)} in 10.`, 1, [], nurse); }
+    if (t - p.meds.cervidil.inT >= 12 * H) sim.floor.bedside(nurse, p, 'cervidil', 3, 60, 'pulling Cervidil', () => { if (p.meds.cervidil.in) { sim.removeCervidil(p, '12 h'); sim.page(p, `Cervidil is out — it's been 12 hours.`, 1, [], nurse); } });
+    else if (rd && rd.ctxPer10 != null && rd.ctxPer10 > 5 && nurse.pit !== 'aggressive') { const c10 = rd.ctxPer10; sim.floor.bedside(nurse, p, 'cervidil', 6, 45, 'pulling Cervidil', () => { if (p.meds.cervidil.in) { sim.removeCervidil(p, 'tachysystole'); sim.page(p, `Pulled her Cervidil — she was contracting ${c10.toFixed(0)} in 10.`, 1, [], nurse); } }); }
   }
 
   // ---- cervical exams on the nurse's own schedule
@@ -121,13 +125,17 @@ export function nurseTick(sim, nurse, p) {
   let sveInt = p.truePhaseKnown === 'second' ? 1e9 : active ? 2 * H : T.laborOnset ? 3.5 * H : 1e9;
   if (p.area === 'triage') sveInt = 1e9;
   const pressure = !T.complete ? (T.dil >= 9 || T.station >= 1) && p.epidural.state !== 'working' : false;
-  if (pressure && !ns.pressureSaid && r.chance(0.2)) { ns.pressureSaid = true; sim.nurseSays(p, `She says she feels a lot of pressure.`, 1); sveInt = 0; }
-  if (t - ns.lastSveT >= sveInt && !T.complete) sim.doSVE(p, 'nurse', 'routine');
-  if (T.complete && p.pushing === 'no' && !p.flags.completePaged && t - ns.lastSveT > (p.epidural.state === 'working' ? 75 : 30) * MIN) sim.doSVE(p, 'nurse', 'routine');
+  if (pressure && !ns.pressureSaid && r.chance(0.2)) { ns.pressureSaid = true; sim.nurseSays(p, `She says she feels a lot of pressure.`, 1); sveInt = 0; ns.sveUrgent = true; }
+  const sve = () => { ns.sveUrgent = false; sim.doSVE(p, 'nurse', 'routine'); };
+  if (t - ns.lastSveT >= sveInt && !T.complete) sim.floor.bedside(nurse, p, 'sve', ns.sveUrgent ? 5 : 3, 90, 'checking her', sve);
+  if (T.complete && p.pushing === 'no' && !p.flags.completePaged && t - ns.lastSveT > (p.epidural.state === 'working' ? 75 : 30) * MIN) sim.floor.bedside(nurse, p, 'sve', 4, 90, 'checking her', sve);
   // nobody answered "push or labor down?": after an hour she starts pushing per unit routine
   if (p.flags.completePaged && p.pushing === 'no' && t - p.flags.completePaged > 60 * MIN && T.complete) {
-    sim.startPushing(p);
-    sim.page(p, `Nobody got back to me, so I started ${p.name.split(' ')[0]} pushing.`, 1, [], nurse);
+    sim.floor.bedside(nurse, p, 'push', 4, 60, 'starting pushing', () => {
+      if (p.pushing !== 'no' || !p.T.complete) return;
+      sim.startPushing(p);
+      sim.page(p, `Nobody got back to me, so I started ${p.name.split(' ')[0]} pushing.`, 1, [], nurse);
+    });
   }
 
   // ---- pain / epidural requests
@@ -180,7 +188,7 @@ function tracingWatch(sim, nurse, p, ns, rd) {
       ns.lastRecoveredPage = t;
       escalate(sim, nurse, p, 'decel', 'decels', `She had a decel down to the ${Math.floor(Math.max(40, rd.baseline - prolonged.depth) / 10) * 10}s for about ${Math.max(1, Math.round(prolonged.dur / 60))} min — back to baseline now. I repositioned her.`, 2,
         [{ label: 'SVE (you)', cmd: { type: 'mdExam', pid: p.id } }, { label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }]);
-      sim.reposition(p, true);
+      sim.floor.bedside(nurse, p, 'reposition', 5, 45, 'repositioning', () => sim.reposition(p, true));
     }
     return;
   }
@@ -201,13 +209,15 @@ function tracingWatch(sim, nurse, p, ns, rd) {
     const what = mis ? r.pick(['some variables', 'a couple of decels, maybe early', 'some dips with contractions']) : 'decels after her contractions — they look late to me';
     escalate(sim, nurse, p, 'lates', 'decels', `Room ${p.room.replace('LDR ', '')}: she's having ${what}. Baseline ${Math.round(rd.baseline / 5) * 5}.`, 2,
       [{ label: 'Pit off', cmd: { type: 'order', pid: p.id, text: 'pit off' } }, { label: 'Reposition', cmd: { type: 'order', pid: p.id, text: 'reposition' } }, { label: 'Bolus', cmd: { type: 'order', pid: p.id, text: 'LR bolus 500' } }]);
-    if (nurse.pit === 'cautious' && p.meds.pit.rate > 0) { sim.setPit(p, Math.floor(p.meds.pit.rate / 2), 'nurse'); sim.nurseSays(p, `I cut her pit in half.`, 1); }
-    sim.reposition(p, true);
+    sim.floor.bedside(nurse, p, 'reposition', 6, 45, 'repositioning', () => {
+      if (nurse.pit === 'cautious' && p.meds.pit.rate > 0) { sim.setPit(p, Math.floor(p.meds.pit.rate / 2), 'nurse'); sim.nurseSays(p, `I cut her pit in half.`, 1); }
+      sim.reposition(p, true);
+    });
   } else if (vars >= 3 && t - ns.lastVarPage > 40 * MIN && r.chance(nurse.alert * 0.8)) {
     ns.lastVarPage = t;
     escalate(sim, nurse, p, 'vars', 'variables', `She's having recurrent variables, some down ${Math.round(Math.max(...rd.decels.map(d => d.depth)) / 10) * 10} beats.`, 2,
       [{ label: 'Reposition', cmd: { type: 'order', pid: p.id, text: 'reposition' } }, { label: 'Amnioinfusion', cmd: { type: 'order', pid: p.id, text: 'amnioinfusion' } }]);
-    sim.reposition(p, true);
+    sim.floor.bedside(nurse, p, 'reposition', 5, 45, 'repositioning', () => sim.reposition(p, true));
   }
   if (rd.variability != null && rd.variability <= 5 && rd.accels.length === 0) {
     ns.flatSince = ns.flatSince ?? t;
@@ -240,6 +250,10 @@ function intrauterineResus(sim, nurse, p) {
   const t = sim.t;
   if (t - p.ns.resusT < 10 * MIN) return;
   p.ns.resusT = t;
+  // she runs; a nurse who knows where this goes grabs terbutaline if the med room is roughly on the way
+  sim.floor.bedside(nurse, p, 'resus', 8, 40, 'intrauterine resuscitation', () => resusAtBedside(sim, nurse, p), nurse.knowledge > 0.7 ? ['terbutaline'] : []);
+}
+function resusAtBedside(sim, nurse, p) {
   sim.reposition(p, true);
   if (nurse.knowledge > 0.5 && p.meds.pit.rate > 0) sim.setPit(p, 0, 'nurse');
   if (nurse.knowledge > 0.6) sim.giveFluid(p, 500, true);
@@ -279,7 +293,12 @@ function pitTitrate(sim, nurse, p, ns, rd) {
 function postpartumNursing(sim, nurse, p, ns) {
   const t = sim.t, pp = p.T.pp, r = sim.nrng;
   if (t - pp.t0 > 2.5 * H && pp.bleed < 2) return;
-  if (t - (ns.lastQblT || pp.t0) >= 15 * MIN) {
+  if (t - (ns.lastQblT || pp.t0) >= 15 * MIN) sim.floor.bedside(nurse, p, 'ppcheck', pp.bleed > 25 || (ns.lastBleedQbl || 0) >= 500 ? 6 : 3, 60, 'fundus & QBL', () => ppCheck(sim, nurse, p, p.ns || ns), pp.bleed > 25 && nurse.knowledge > 0.6 ? ['methergine', 'hemabate', 'misoprostol'] : []);
+}
+function ppCheck(sim, nurse, p, ns) {
+  const t = sim.t, pp = p.T.pp;
+  if (!pp) return;
+  {
     ns.lastQblT = t;
     const q = Math.round(pp.qbl / 25) * 25;
     p.chart.vitals.push({ t, qbl: q, by: nurse.name, fundus: pp.tone > 0.7 ? 'firm' : pp.tone > 0.5 ? 'boggy, firms with massage' : 'boggy' });

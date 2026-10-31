@@ -35,6 +35,11 @@
     <aside id="board"></aside>
     <section id="center">
       <div id="emerg" class="hidden"></div>
+      <div id="floorWrap">
+        <div class="floorHead"><b>Floor</b><span id="meStatus"></span><span class="legendDots"><i style="background:#fff"></i>you <i style="background:#4fd1c5"></i>RN <i style="background:#b794f4"></i>triage RN <i style="background:#ffb454"></i>charge <i style="background:#f5e663"></i>anesthesia <i style="background:#7CFC9A"></i>carrying meds</span>
+          <button id="floorToggle" class="ghost small" title="Show/hide the floor map (M)">▾</button></div>
+        <canvas id="floor" title="Click a room to walk there (shift-click to run)"></canvas>
+      </div>
       <div id="ptHeader"></div>
       <div id="stripWrap">
         <canvas id="strip"></canvas>

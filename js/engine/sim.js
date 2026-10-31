@@ -5,7 +5,8 @@ import { ROOMS, TRIAGE_BAYS, LABS } from './data.js';
 import { clamp, fmtClockColon } from './util.js';
 import { stepPatient, quietStep, sampleHistory, neonatalOutcome, startPostpartum, abxActive } from './physio.js';
 import { analyzeStrip, annotate } from './monitor.js';
-import { parseOrder } from './orders.js';
+import { parseOrder, DRUG_IDS } from './orders.js';
+import { Floor, placeOf, WALK, RUN } from './floor.js';
 import { HANDLERS } from './drugs.js';
 import { makeNurse, nurseExam, nurseTick, sveString, escalate } from './nurses.js';
 import { setupScenario } from './scenario.js';
@@ -30,6 +31,7 @@ export class Sim {
     this.brng = this.rng.fork('backup-ob'); // only moves when you ignore your pages: can't shift the chaos timeline
     this.lrng = this.rng.fork('labs');
     this.crng = this.rng.fork('chaos');
+    this.frng = this.rng.fork('floor'); // walking, drawing up, rounding: its own stream
     this.t = 0;
     this.startClock = START_CLOCK;
     this.endT = 12 * H;
@@ -57,6 +59,7 @@ export class Sim {
     this.floorLog = [];
     resetPatientIds();
     setupScenario(this);
+    this.floor = new Floor(this);
     this.preroll(40 * MIN);
   }
 
@@ -121,6 +124,8 @@ export class Sim {
         if (n && n.onDuty) nurseTick(this, n, p);
       }
     }
+    this.floor.tick();
+    if (t % 5 === 0) this.emergencyCrew();
     if (t % 10 === 0) this.resourceStep();
     if (t >= this.endT) { this.ended = true; this.emitUI('ended'); }
   }
@@ -192,6 +197,7 @@ export class Sim {
         return { ok: true };
       }
       case 'lab': return this.labSet(cmd);
+      case 'walk': return this.floor.walk(cmd.place, cmd.run ? RUN : WALK);
       case 'endShift': this.endT = this.t + 1; return { ok: true };
       default: return { ok: false, msg: 'Unknown command' };
     }
@@ -215,7 +221,7 @@ export class Sim {
     (p.flags.chain || (p.flags.chain = [])).push({ t: this.t, key, what });
     this.logTruth(p, `Backup OB called over your head: ${what}`);
     this.charge(`I couldn't reach you, so I called ${doc} (backup OB) to see ${first} about her ${what}. Chain of command — it's going in my note.`, 2, [], p);
-    this.after(Math.round(this.brng.range(12, 28)) * MIN, () => {
+    this.after(Math.round(this.brng.range(8, 20)) * MIN, () => this.floor.backupVisit(p, () => {
       if (p.status === 'gone' || (p.crisis && p.crisis.phase === 'dead')) return;
       if ((p.flags.mdT ?? -1e9) > askedT) { this.charge(`${doc} came by for ${first}, saw you'd put orders in, and left.`, 0, [], p); return; }
       const T = p.T, rd = p.read;
@@ -229,7 +235,7 @@ export class Sim {
       const done = [];
       for (const text of plan) if (this.internalOrder(p, text)) done.push(text);
       this.msg(`${doc} (backup OB)`, 'attending', p, `Saw ${first}. ${done.length ? 'Ordered: ' + done.join(', ') + '.' : 'Nothing more to add right now.'} ${this.brng.pick(['Call me if you need me — and answer your pages.', 'Your nurse was right to call.', 'She needed someone at the bedside an hour ago.', 'I\'ll document. Come find me after.'])}`, 2);
-    });
+    }, 'backup OB'));
   }
   // an order placed by someone other than you (backup OB): no pushback, no pharmacy call, not in your command log
   internalOrder(p, text) {
@@ -258,7 +264,8 @@ export class Sim {
     const order = { id: this.nextOrderId++, pid, t: this.t, text, label: prep.label, status: 'new', prep, issues: prep.issues, parsedId: o.id, urgency: o.urgency };
     p.chart.orders.push(order);
     this.processOrder(order, 0);
-    return { ok: true, msg: prep.label, order };
+    const eta = order.status === 'pending' && order.eta > 30 ? ` (~${Math.max(1, Math.round(order.eta / 60))} min)` : '';
+    return { ok: true, msg: prep.label + eta, order };
   }
 
   findOrder(oid) { for (const p of this.patients) { const o = p.chart.orders.find(x => x.id === oid); if (o) return [o, p]; } return [null, null]; }
@@ -322,28 +329,72 @@ export class Sim {
     return { ok: true };
   }
 
+  // A shoulder dystocia or a code: you hear it and run, and free hands converge on the room.
+  emergencyCrew() {
+    for (const p of this.patients) {
+      if (p.status === 'gone' || !realtimeEmergency(p)) continue;
+      const key = p.sd && p.sd.active ? 'sd' + p.sd.t0 : 'code' + (p.crisis.arrestT ?? p.crisis.t0);
+      if (p.crewKey === key) continue;
+      p.crewKey = key;
+      this.floor.summonMd(p, key);
+      this.floor.allHands(p, () => realtimeEmergency(p) && p.status !== 'gone', p.crisis ? 3 : 2);
+    }
+  }
+
   executeOrder(order) {
     const p = this.byId[order.pid];
     const prep = order.prep;
     order.status = 'pending';
     const nurse = this.nurseOf(p);
     let [lo, hi] = prep.delay;
-    if (prep.who === 'nurse' && nurse) { const load = nurse.patients.length; lo *= 1 + 0.25 * (load - 1); hi *= 1 + 0.35 * (load - 1); }
+    const done = (by) => this.completeOrder(order, by);
+    // On the floor, who does it and how long it takes comes from where people are (floor.js); the old
+    // flat delays stay for pharmacy/blood-bank turnaround and for anything happening off the floor.
+    const pl = placeOf(p);
+    const onFloor = pl && pl !== 'Waiting' && p.area !== 'or';
+    if (onFloor && prep.who === 'md' && hi > 0) {
+      const dur = Math.round((lo + (hi - lo) * this.orng.next()) * MIN * 0.5);
+      order.eta = this.floor.mdTask(p, prep.label.replace(/ \(you[^)]*\)/, ''), dur, () => done());
+      return;
+    }
+    if (onFloor && prep.who === 'nurse' && nurse && hi >= 0.5) {
+      const id = order.parsedId || '';
+      const urgentDrug = /terbutaline|labetalol|hydralazine|nifedipine|methergine|hemabate|txa|calcium|phenylephrine|ephedrine|epinephrine/.test(id);
+      order.prio = order.urgency === 'stat' ? 7 : urgentDrug || /off|down|stop|transfus|MTP|massive|bolus|O₂|oxygen|reposition|massage|amnioinf/i.test(prep.label) ? 6 : 4;
+      order.drug = DRUG_IDS.has(id) && id !== 'fluids' ? id : null;
+      order.infusion = /oxytocin|magnesium/.test(id) && !/off|stop|down/i.test(prep.label);
+      order.taskSec = order.drug ? [30, 75] : [Math.max(20, lo * 30), Math.max(40, lo * 60)];
+      // pharmacy-verified first doses and blood products have to arrive before anyone can give them
+      const wait = lo >= 5 ? Math.max(0, Math.round((lo + (hi - lo) * this.orng.next() - 2) * MIN)) : 0;
+      const go = () => {
+        if (order.status !== 'pending') return;
+        const r = this.floor.nurseOrder(order, p, (ag) => done(ag));
+        if (!r) done();
+      };
+      const est = this.floor.estimate(order, p);
+      order.eta = wait + est;
+      if (wait > 0) this.after(wait, go); else go();
+      return;
+    }
     if (order.urgency === 'stat') { lo *= 0.5; hi *= 0.5; }
+    if (prep.who === 'nurse' && nurse) { const load = nurse.patients.length; lo *= 1 + 0.25 * (load - 1); hi *= 1 + 0.35 * (load - 1); }
     const delay = Math.round((lo + (hi - lo) * this.orng.next()) * MIN);
-    const done = () => {
-      if (order.status !== 'pending') return;
-      if (p.status === 'gone') { order.status = 'cancelled'; return; }
-      order.status = 'done'; order.doneT = this.t;
-      prep.run();
-      if (prep.who === 'nurse') p.chart.mar.push({ t: this.t, text: prep.label, by: nurse ? nurse.name : 'RN' });
-      if (!/^Lab:|SVE|Vitals|Bedside|Admit|Discharge/.test(prep.label)) this.note(p, shortLabel(prep.label));
-      if (order.overridden && order.issues.some(i => i.sev >= 2)) {
-        p.overrides = (p.overrides || 0) + 1;
-        this.logTruth(p, `Override: ${prep.label} (${order.issues.map(i => i.msg).join(' ')})`);
-      }
-    };
-    if (delay <= 0) done(); else this.after(delay, done, 'order');
+    order.eta = delay;
+    if (delay <= 0) done(); else this.after(delay, () => done(), 'order');
+  }
+  completeOrder(order, by) {
+    const p = this.byId[order.pid], prep = order.prep;
+    if (order.status !== 'pending') return;
+    if (p.status === 'gone') { order.status = 'cancelled'; return; }
+    order.status = 'done'; order.doneT = this.t;
+    prep.run();
+    const nurse = this.nurseOf(p);
+    if (prep.who === 'nurse') p.chart.mar.push({ t: this.t, text: prep.label, by: by && by.name ? by.name : nurse ? nurse.name : 'RN' });
+    if (!/^Lab:|SVE|Vitals|Bedside|Admit|Discharge/.test(prep.label)) this.note(p, shortLabel(prep.label));
+    if (order.overridden && order.issues.some(i => i.sev >= 2)) {
+      p.overrides = (p.overrides || 0) + 1;
+      this.logTruth(p, `Override: ${prep.label} (${order.issues.map(i => i.msg).join(' ')})`);
+    }
   }
 
   // -------------------------------------------------------------------- dosing API (drugs.js)
@@ -529,9 +580,13 @@ export class Sim {
     const p = this.byId[pid];
     if (!p || p.T.pp) return { ok: false, msg: 'Nothing to examine.' };
     if (p.area === 'or' || p.area === 'home' || p.area === 'offsite') return { ok: false, msg: 'She is not on the floor.' };
-    if (p.mdExamBusyUntil > this.t) return { ok: false, msg: 'You are already examining her.' };
-    p.mdExamBusyUntil = this.t + 4 * MIN;
-    this.after(3 * MIN + 30, () => {
+    if (p.mdExamBusyUntil > this.t) return { ok: false, msg: 'You are already on your way to examine her.' };
+    // you have to walk there first (floor.js); the exam itself takes a minute or two
+    const examSec = Math.round(this.frng.range(60, 120));
+    p.mdExamBusyUntil = this.t + 1e9;
+    const eta = this.floor.mdTask(p, 'exam', examSec, () => {
+      p.mdExamBusyUntil = 0;
+      if (p.status === 'gone' || p.T.pp || p.area === 'or') return;
       if (p.dx.previa && !p.known.previa) { this.harm(p, 'previa_bleed'); return; }
       const e = nurseExam(null, p, this.nrng, true);
       this.recordSVE(p, e, 'You (MD)', 'md');
@@ -539,7 +594,7 @@ export class Sim {
       if (p.T.prolapse) { p.known.prolapse = true; p.T.prolapseRelieved = true; }
       if (e.dil >= 10 && p.ns) p.ns.completeFound = true;
     });
-    return { ok: true, msg: 'Walking to the room to examine her (≈4 min).' };
+    return { ok: true, msg: this.floor.mdHere(p) && eta < 150 ? 'Examining her…' : `Exam queued — you'll be at her bedside in ~${Math.max(1, Math.round((eta - examSec) / 60))} min.` };
   }
   bedsideUS(p) {
     const T = p.T, r = this.nrng;
@@ -701,8 +756,9 @@ export class Sim {
     if (p.nurseId) { const old = this.nurseById(p.nurseId); if (old) old.patients = old.patients.filter(id => id !== p.id); }
     p.nurseId = tn.id; tn.patients.push(p.id); p.ns = null;
     if (returning) this.charge(`${p.name} is back in triage${p.T.seizingUntil > 0 ? ' — EMS says she SEIZED at home' : ''}. ${this.complaintText(p)}.`, p.T.seizingUntil > 0 || p.T.abr > 0.4 ? 3 : 2, [], p);
-    // triage nurse intake ~15-25 min
-    this.after(this.nrng.range(12, 25) * MIN, () => this.triageSummary(p));
+    // triage nurse intake ~12-25 min at the bay; she does one patient at a time, so walk-ins queue
+    const intake = Math.round(this.nrng.range(12, 25) * MIN);
+    this.floor.bedside(tn, p, 'intake', 4, intake, 'triage intake', () => this.triageSummary(p));
   }
   complaintText(p) {
     return ({ ctx: 'contractions', rom: 'leaking fluid', dfm: 'decreased fetal movement', bp: 'elevated BP / headache', bleed: 'vaginal bleeding', request: 'wants to be induced', preterm: 'preterm contractions' })[p.sub] || p.indication;

@@ -51,6 +51,27 @@ paging you.
   she arrests (mostly PEA) through the same code. Epi and shocks do little on an empty heart; blood and a stopped
   source (back to the OR) are what bring her back, and each re-arrest is harder. Untreated, she dies.
 
+## The floor (map, walking, nurses who move)
+
+The map above the strip is the unit from above: L&D's eight LDRs, med room, report room, ORs, PACU and call room
+along one corridor, and the OB ED (three triage bays, waiting room, entrance) as its own wing down a public hallway
+through two badge doors. Everyone is a dot that walks it in game time (`js/engine/floor.js`): you (white), the
+nurses (teal; triage RN purple), the charge nurse (orange), anesthesia (yellow), the backup OB when called. A green
+pip means she's carrying meds; a red ring means she's running.
+
+- **You**: click a room to walk there (shift-click runs). Your exams and bedside procedures (AROM, Foley, bedside
+  US, vacuum, Bakri) queue up and happen when you get there. Orders go in from anywhere. A dystocia or a code
+  makes you run.
+- **Nurses** run a utility scheduler: each task has a priority, an age and a travel cost, and something three
+  levels hotter preempts what she's doing. Vitals, exams, Pit titration, intrauterine resuscitation, postpartum
+  checks and the orders you write all happen *at the bedside*, so how long things take falls out of where she is and
+  what else she has. Medications are pulled in the med room first; experienced nurses grab terbutaline on the way to a
+  bad strip and the hemorrhage meds on the way to a bleed. A nurse stuck in an emergency hands a STAT med to whoever
+  can get it there sooner (often the charge nurse). With nothing urgent they sit with laboring, pushing, fresh
+  postpartum and magnesium patients, and otherwise chart at the station. Strip-watching pages still come from the
+  central monitor wherever she is.
+- Orders now say how long they'll take (`Terbutaline 0.25 mg SQ (~3 min)`).
+
 ## Your phone and the chain of command
 
 Pages arrive on **SecureChat** (right; **P** pockets the phone). It logs you out about every 30 game minutes "for
@@ -59,9 +80,10 @@ hospital security purposes" (IS-114, rev. 1998): you see *who* is paging, not wh
 Bedside findings and overhead pages stay off the phone (under the order box). The phone is UI only; it never
 touches the sim, so replays are exact.
 
-**♥ room audio** (header toggle): when you open a patient you hear her room — the monitor chirp, the pump's triple
+**♥ room audio** (header toggle): when you walk into an occupied room you hear it — the monitor chirp, the pump's triple
 beep if Pit or magnesium is running, the vitals alarm if her last charted vitals are out of range — and then the
-Doppler, synthesized beat by beat at whatever rate the paper is printing. Decels slow it, a lost signal is static,
+Doppler of the room you're standing in (or, quietly, the selected patient's from the central monitor), synthesized
+beat by beat at whatever rate the paper is printing. Decels slow it, a lost signal is static,
 and a transducer on mom's pulse sounds like mom's rate. It reads only what the monitor shows, never the truth.
 
 A nurse whose page goes unanswered doesn't repeat herself: she calls again in her own voice, then asks you to come to
@@ -84,10 +106,11 @@ epinephrine in the first 5 min, calcium in the first 5 min of a magnesium arrest
 | `orders.js` / `drugs.js` | Free-text order parser, plus a drug/action database with dose, route and interval limits and contraindications → pharmacy callback, nurse pushback, or harm |
 | `sim.js` | The floor: rooms, triage, OR + anesthesia queues, labs, delivery, messages, command log and replay |
 | `scenario.js` | Sign-out presets, the board, the chaos timeline, shift change |
+| `floor.js` | The unit plan as a waypoint graph, and the people on it: movement, the nurses' task scheduler, med-room trips, handoffs |
 | `emergency.js` | Shoulder dystocia and AFE/maternal-arrest state machines (maneuvers, code team, rhythm checks, hysterotomy) |
 | `scoring.js` | Outcomes, NTSV CS rate, OCC-2014 CS criteria, DDI, severe-BP time-to-treat |
 
-UI (`js/ui`): `app.js` (board, chart, orders, pages, speed loop), `strip.js` (US paper at 3 cm/min),
+UI (`js/ui`): `app.js` (board, chart, orders, phone, speed loop), `floormap.js` (the map), `sound.js` (room audio), `strip.js` (US paper at 3 cm/min),
 `debrief.js` (truth vs report).
 
 **Determinism:** same seed plus same command log gives the same night. Replays are stored in localStorage (last 20)

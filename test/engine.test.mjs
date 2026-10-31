@@ -270,7 +270,7 @@ console.log('nurse chain of command');
     const cnt = {};
     for (const m of sim.msgs) {
       if (m.role === 'charge' && /paged you three times/.test(m.text)) charge++;
-      if (m.role === 'nurse') { const k = m.pid + '|' + m.text.replace(/\d+/g, '#'); cnt[k] = (cnt[k] || 0) + 1; if (cnt[k] > maxRep) { maxRep = cnt[k]; worst = k; } }
+      if (m.role === 'nurse' && !/^Rhythm check/.test(m.text)) { const k = m.pid + '|' + m.text.replace(/\d+/g, '#'); cnt[k] = (cnt[k] || 0) + 1; if (cnt[k] > maxRep) { maxRep = cnt[k]; worst = k; } }
     }
     backup += sim.patients.reduce((a, p) => a + ((p.flags.chain || []).length), 0);
     const sc = computeScore(sim);
@@ -279,6 +279,52 @@ console.log('nurse chain of command');
   check('ignored nurses escalate instead of looping', maxRep <= 8, `worst repeat ${maxRep}× (${worst.slice(0, 70)})`);
   check('charge nurse goes up the chain when pages go unanswered', charge >= 2 && backup >= 2, `${charge} charge calls, ${backup} backup-OB visits over 4 idle nights`);
   check('undelivered fetal deaths are scored', fetalDeathScored === fetalDeaths, `${fetalDeathScored}/${fetalDeaths}`);
+}
+
+console.log('the floor (people walking)');
+{
+  // your exam waits for you to get there; walking is a logged command and replays exactly
+  const sim = new Sim({ seed: 'walk', mode: 'night' });
+  sim.run(600);
+  const p = sim.patients.find(x => x.area === 'ldr' && !x.T.pp);
+  sim.command({ type: 'walk', place: 'Triage A' }); sim.run(120);
+  const atTriage = sim.floor.md.at === 'Triage A';
+  const n0 = p.chart.sves.length, t0 = sim.t;
+  sim.command({ type: 'mdExam', pid: p.id });
+  let examT = null;
+  for (let i = 0; i < 900 && examT == null; i++) { sim.run(1); if (p.chart.sves.length > n0 && p.chart.sves[p.chart.sves.length - 1].by.startsWith('You')) examT = sim.t - t0; }
+  const walkSec = (Math.abs(-41 - 5) + 40) / 2.1; // rough lower bound: across the hallway at a hurry
+  check('you walked to triage', atTriage, sim.floor.md.at);
+  check('your exam happens after you walk back', examT != null && examT > walkSec, `${examT} s (walk ≥ ${walkSec.toFixed(0)} s)`);
+  const re = new Sim({ seed: 'walk', mode: 'night' }); re.loadReplay(sim.cmdLog); re.run(sim.t);
+  check('walking replays exactly', re.floor.md.x === sim.floor.md.x && re.floor.md.y === sim.floor.md.y && re.patients.every((q, i) => q.chart.sves.length === sim.patients[i].chart.sves.length));
+
+  // a STAT med goes through the med room; if her nurse is pinned in a code, someone else brings it
+  const etas = [];
+  let handed = 0, viaMed = 0;
+  for (let i = 0; i < 6; i++) {
+    const s2 = new Sim({ seed: 'med' + i, mode: 'night' });
+    s2.run(900);
+    const q = s2.patients.find(x => x.area === 'ldr' && !x.T.pp);
+    const nu = s2.nurseOf(q), a = s2.floor.agentOf(nu);
+    let medVisit = false;
+    if (i % 2) a.task = s2.floor.task({ key: 'emerg:x', kind: 'emerg', pid: q.id, prio: 9, steps: [{ place: 'LDR 8', dur: 1e9, label: 'EMERGENCY' }] });
+    const o = s2.command({ type: 'order', pid: q.id, text: 'terbutaline 0.25 mg SQ stat' }).order;
+    for (let k = 0; k < 1200 && o.status === 'pending'; k++) { s2.run(1); if (s2.floor.agents.some(g => g.at === 'Med room' && g.task && g.task.key === 'order:' + o.id)) medVisit = true; }
+    if (o.status === 'done') etas.push((o.doneT - o.t) / 60);
+    if (medVisit) viaMed++;
+    const mar = q.chart.mar[q.chart.mar.length - 1];
+    if (i % 2 && mar && mar.by !== nu.name) handed++;
+  }
+  check('STAT terbutaline reaches the bedside in a few minutes', etas.length === 6 && Math.max(...etas) < 8 && Math.min(...etas) > 0.7, etas.map(x => x.toFixed(1)).join(', ') + ' min');
+  check('meds are pulled from the med room', viaMed === 6, `${viaMed}/6`);
+  check('a nurse stuck in an emergency hands the STAT med off', handed === 3, `${handed}/3`);
+
+  // nobody gets stuck: over a whole night no task is hours old
+  const s3 = new Sim({ seed: 'stuck', mode: 'night' });
+  let worst = 0, who = '';
+  for (let h = 0; h < 12 * 60; h++) { s3.run(60); for (const g of s3.floor.agents) if (g.task && g.task.kind !== 'emerg' && g.task.kind !== 'round') { const age = s3.t - g.task.created; if (age > worst) { worst = age; who = g.name + ':' + g.task.kind; } } }
+  check('no nurse task gets stuck', worst < 2.5 * H, `oldest ${(worst / 60).toFixed(0)} min (${who})`);
 }
 
 console.log('black cloud');

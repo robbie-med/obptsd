@@ -64,11 +64,12 @@ export function enterRoom(sim, p) {
 }
 
 // Called every animation frame while the FHR audio toggle is on.
-export function dopplerTick(sim, p, running) {
+export function dopplerTick(sim, p, running, vol = 1) {
   if (!p || !running || !p.mon || !p.mon.on) { nextBeat = 0; return; }
   try {
     ctx();
     const now = ac.currentTime;
+    master.gain.setTargetAtTime(0.9 * vol, now, 0.2);
     if (p.id !== lastPid) { lastPid = p.id; nextBeat = now + 0.4; }
     if (nextBeat < now) nextBeat = now + 0.05;
     while (nextBeat < now + 0.12) {
