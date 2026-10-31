@@ -2,6 +2,7 @@
 // so every night is replayable from (seed, command log).
 import { enterRoom, dopplerTick, stopAll as stopSound } from './sound.js';
 import { drawFloor, roomAt, setHover } from './floormap.js';
+import { landingHTML } from './landing.js';
 import { Sim } from '../engine/sim.js';
 import { parseOrder, describeParsed, ORDER_HINTS } from '../engine/orders.js';
 import { sveString } from '../engine/nurses.js';
@@ -27,56 +28,47 @@ const ui = {
 function loadHistory() { try { return JSON.parse(localStorage.getItem('obfloor.history') || '[]'); } catch { return []; } }
 function saveHistory(h) { try { localStorage.setItem('obfloor.history', JSON.stringify(h.slice(-20))); } catch { /* storage unavailable */ } }
 
+function loadPrefs() { try { return JSON.parse(localStorage.getItem('obfloor.prefs') || '{}'); } catch { return {}; } }
+function savePrefs(p) { try { localStorage.setItem('obfloor.prefs', JSON.stringify(p)); } catch { /* storage unavailable */ } }
+
+// The front page (landing.js) doubles as the menu: Step in starts a night, the in-game Menu button
+// brings it back with Resume / Replay / Import.
 function showMenu(first = false) {
   const hist = loadHistory();
   const last = hist[hist.length - 1];
-  const ov = $('#overlay');
-  const seed = ui.sim ? ui.sim.seed : randomSeed();
-  ov.innerHTML = `<div class="dlg">
-    <h1>L&amp;D Night</h1>
-    <p class="lead">You're the OB on the labor floor. You don't catch babies — you manage everything up to delivery: triage, inductions, Pit, magnesium, the strip, and when to call the section. Every patient has a hidden physiology; you only see it through the monitor and your nurses.</p>
-    <div class="modes">
-      <div class="mode on" data-mode="night"><b>Night shift</b><span>19:00 → 07:00. Sign-out from days, a full board, walk-ins, phone calls, one OR, one anesthesiologist.</span></div>
-      <div class="mode" data-mode="quick"><b>Short shift</b><span>19:00 → 23:00. Three patients on the floor, a scheduled section, some walk-ins.</span></div>
-      <div class="mode" data-mode="single"><b>Single patient</b><span>One unripe G1 induction and her nurse. Ripening, Pit titration, SVEs. No chaos.</span></div>
-      <div class="mode" data-mode="lab"><b>Tracing lab</b><span>Watch the FHR/toco generator and turn the hidden knobs: placental reserve, Pit, cord, hypotension.</span></div>
-    </div>
-    <div class="row"><label>Seed <input id="seedIn" value="${esc(seed)}" style="width:180px"></label>
-      <button id="rndSeed" class="ghost small">🎲</button>
-      <label class="toggle"><input type="checkbox" id="teachIn"> teaching mode (show hidden truth live)</label>
-      <label class="toggle" title="Shoulder dystocia ×3, amniotic fluid embolism ×75"><input type="checkbox" id="cloudIn"> ☁ black cloud (the rare disasters stop being rare)</label></div>
-    <div class="btnrow">
-      <button id="startBtn" class="big-btn">Start shift</button>
-      ${ui.sim && !ui.ended ? '<button id="resumeBtn">Resume</button>' : ''}
-      ${last ? `<button id="replayBtn">Replay last night (${esc(last.seed)}, ${last.mode}${last.blackCloud ? ', black cloud' : ''})</button>` : ''}
-      ${ui.sim ? '<button id="exportBtn" class="ghost">Export this night (JSON)</button>' : ''}
-      <label class="ghost" style="border:1px solid var(--line2);border-radius:6px;padding:4px 9px;cursor:pointer">Import replay… <input type="file" id="importIn" accept=".json" class="hidden"></label>
-    </div>
-    <h2>How to play</h2>
-    <div class="help">
-      <p><b>Select a patient</b> on the board (left). Her strip, vitals and chart are in the middle; pages from nurses, pharmacy, lab and anesthesia land on your phone (right; <b>P</b> pockets it). SecureChat logs you out about every half hour for hospital security purposes — you'll see who is paging, but you have to log in to read it.</p>
-      <p><b>Write orders in free text</b>: <code>pit per protocol</code>, <code>pit up 2</code>, <code>pit off</code>, <code>miso 25 mcg PV q4h</code>, <code>cervidil</code>, <code>foley bulb</code>, <code>AROM</code>, <code>mag 4 g IV load then 2 g/h</code>, <code>labetalol 20 mg IV</code>, <code>PCN G 5 MU IV then 2.5 MU q4h</code>, <code>terbutaline 0.25 mg SQ</code>, <code>epidural</code>, <code>c-section stat for prolonged decel</code>, <code>TXA 1 g IV</code>.</p>
-      <p><b>Wrong orders</b> get nurse pushback, a pharmacy callback — or they quietly go through and hurt someone, depending on who's on.</p>
-      <p><b>Nurses are people.</b> Each has a persistent bias and noise on exams, her own Pit style, and her own threshold for calling you. Two exams 20 minutes apart can disagree. Examine her yourself when it matters (it takes time).</p>
-      <p><b>Read the strip yourself.</b> The game never labels the category. US paper: FHR 30–240, 3 cm/min. Blue dashed = maternal pulse (watch for pickup). With <code>IUPC</code> the bottom channel is true mmHg.</p>
-      <p><b>Emergencies run in real time.</b> A shoulder dystocia or a maternal code drops the clock to 1× and puts a bar with a timer over the chart. You call the maneuvers (<code>McRoberts</code>, <code>suprapubic pressure</code>, <code>deliver posterior arm</code>, <code>woods screw</code>, <code>gaskin</code>, <code>Zavanelli</code>) or run the code (<code>epinephrine 1 mg IV</code>, <code>LUD</code>, <code>defibrillate</code>, <code>intubate</code>, <code>resuscitative hysterotomy</code>, <code>massive transfusion</code>, <code>cryo 10 units</code>). The rest of the floor keeps going.</p>
-      <p><b>One OR, one anesthesiologist.</b> A crash section bumps your scheduled repeat and makes the epidurals wait. You can <code>call backup</code> (30 min).</p>
-      <p><b>Scoring</b> is on outcomes (cord gas, NICU, hemorrhage, eclampsia…), with the NTSV cesarean rate tracked so sectioning everyone doesn't win. The debrief reveals the hidden truth next to what you were told.</p>
-      <p><b>Keys</b>: <code>space</code> pause · <code>1</code>–<code>4</code> speed · <code>N</code> next page · <code>/</code> order box · <code>E</code> examine · <code>[</code> <code>]</code> prev/next patient.</p>
-    </div>
-  </div>`;
-  ov.classList.add('show');
-  let mode = 'night';
-  ov.querySelectorAll('.mode').forEach(el => el.onclick = () => { ov.querySelectorAll('.mode').forEach(x => x.classList.remove('on')); el.classList.add('on'); mode = el.dataset.mode; });
+  const lp = $('#landing');
+  const prefs = loadPrefs();
+  const seed = ui.sim && !first ? ui.sim.seed : randomSeed();
+  lp.innerHTML = landingHTML({ seed: esc(seed), last, canResume: !!(ui.sim && !ui.ended && !first), hasSim: !!ui.sim && !first, prefs });
+  lp.classList.remove('hidden');
+  lp.scrollTop = 0;
+  document.body.classList.add('lp-open');
+  const read = () => ({
+    mode: (lp.querySelector('input[name=lpMode]:checked') || {}).value || 'night',
+    cloud: $('#cloudIn').checked, teach: $('#teachIn').checked, autoslow: $('#autoslowIn').checked,
+    sound: $('#soundIn').checked, fhr: $('#fhrIn').checked,
+  });
+  const apply = () => {
+    const p = read(); savePrefs(p);
+    $('#autoslow').checked = p.autoslow; $('#sound').checked = p.sound; $('#fhrAudio').checked = p.fhr;
+    return p;
+  };
+  lp.querySelectorAll('input').forEach(el => el.addEventListener('change', apply));
+  const close = () => { lp.classList.add('hidden'); lp.innerHTML = ''; document.body.classList.remove('lp-open'); };
   $('#rndSeed').onclick = () => { $('#seedIn').value = randomSeed(); };
-  $('#startBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode, seed: $('#seedIn').value.trim() || randomSeed(), teaching: $('#teachIn').checked, blackCloud: $('#cloudIn').checked }); };
-  if ($('#resumeBtn')) $('#resumeBtn').onclick = () => ov.classList.remove('show');
-  if ($('#replayBtn')) $('#replayBtn').onclick = () => { ov.classList.remove('show'); newGame({ mode: last.mode, seed: last.seed, replay: last.log, blackCloud: !!last.blackCloud }); };
+  $('#startBtn').onclick = () => {
+    const p = apply(); close();
+    newGame({ mode: p.mode, seed: $('#seedIn') ? $('#seedIn').value.trim() || randomSeed() : seed, teaching: p.teach, blackCloud: p.cloud });
+  };
+  $('#seedIn').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#startBtn').click(); });
+  if ($('#resumeBtn')) $('#resumeBtn').onclick = () => { apply(); close(); };
+  if ($('#replayBtn')) $('#replayBtn').onclick = () => { apply(); close(); newGame({ mode: last.mode, seed: last.seed, replay: last.log, blackCloud: !!last.blackCloud }); };
   if ($('#exportBtn')) $('#exportBtn').onclick = exportNight;
   $('#importIn').onchange = (e) => {
     const f = e.target.files[0]; if (!f) return;
-    f.text().then(txt => { try { const j = JSON.parse(txt); ov.classList.remove('show'); newGame({ mode: j.mode, seed: j.seed, replay: j.log, blackCloud: !!j.blackCloud }); } catch { alert('Not a replay file.'); } });
+    f.text().then(txt => { try { const j = JSON.parse(txt); apply(); close(); newGame({ mode: j.mode, seed: j.seed, replay: j.log, blackCloud: !!j.blackCloud }); } catch { alert('Not a replay file.'); } });
   };
+  apply();
   if (first) setSpeed(0);
 }
 function randomSeed() {
@@ -772,7 +764,7 @@ function wire() {
   }, { passive: false });
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
-    if ($('#overlay').classList.contains('show')) return;
+    if ($('#overlay').classList.contains('show') || !$('#landing').classList.contains('hidden')) return;
     if (e.key === ' ') { e.preventDefault(); setSpeed(ui.speed ? 0 : 1); }
     else if (e.key === '1') setSpeed(1); else if (e.key === '2') setSpeed(10); else if (e.key === '3') setSpeed(60); else if (e.key === '4') setSpeed(240);
     else if (e.key === 'n' || e.key === 'N') setSpeed('skip');
