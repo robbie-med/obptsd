@@ -82,8 +82,7 @@ touches the sim, so replays are exact.
 
 **♥ room audio** (header toggle): when you walk into an occupied room you hear it — the monitor chirp, the pump's triple
 beep if Pit or magnesium is running, the vitals alarm if her last charted vitals are out of range — and then the
-Doppler of the room you're standing in (or, quietly, the selected patient's from the central monitor), synthesized
-beat by beat at whatever rate the paper is printing. Decels slow it, a lost signal is static,
+Doppler of the room you're standing in (only while you're in it), synthesized beat by beat at whatever rate the paper is printing. Decels slow it, a lost signal is static,
 and a transducer on mom's pulse sounds like mom's rate. It reads only what the monitor shows, never the truth.
 
 A nurse whose page goes unanswered doesn't repeat herself: she calls again in her own voice, then asks you to come to

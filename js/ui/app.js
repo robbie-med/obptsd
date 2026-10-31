@@ -137,14 +137,13 @@ function frame(now) {
     }
   }
   if (s && s.floor) {
-    // the room you walk into chirps at you; you hear the Doppler of the room you're standing in,
-    // or (quietly, from the central monitor) the patient you have selected
+    // the room you walk into chirps at you, and you hear the Doppler only while you're standing in it
     const md = s.floor.md;
     const here = !md.path.length ? s.patients.find(q => q.status !== 'gone' && q.room === md.at && q.area !== 'or') : null;
     const audio = $('#fhrAudio').checked && !ui.ended;
     if (here && ui.lastRoom !== md.at && audio) enterRoom(s, here);
     ui.lastRoom = md.path.length ? null : md.at;
-    dopplerTick(s, here || s.byId[ui.selId], audio && !!ui.speed, here ? 1 : 0.3);
+    dopplerTick(s, here, audio && !!ui.speed);
   }
   if (s && !ui.ended && ui.speed && now - ui.lastAlarm > 2000 && s.realtimeEmergency()) { ui.lastAlarm = now; alarm(); }
   if (s) {
